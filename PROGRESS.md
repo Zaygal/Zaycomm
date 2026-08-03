@@ -38,15 +38,6 @@ envelope, wire encoding, and back.
   (RFC-0004's real spec uses a skipped-message-key cache for this).
   Scoped out for Phase 1's in-order direct link; relevant again once
   RFC-0009's store-and-forward layer is built.
-- `handshake.ts`, `ratchet.ts`, and now `identity.ts` each contain
-  their own local copy of small byte helpers (`buildNonce`,
-  `concatBytes`, `bytesEqual`, `u32le`/`u64le`). Three files now
-  duplicate this, which is the threshold that justifies factoring
-  them into a shared `src/crypto/util.ts`. Deliberately not done yet,
-  touching three already-tested, passing files to save a few
-  duplicate lines carries real risk for cosmetic benefit. Worth doing
-  as its own small, isolated cleanup pass, not bundled into feature
-  work.
 - Full sender-sealing (RFC-0004 Section 4) is only partially in place.
   `envelope.ts`'s sealed payload carries the ratchet's ephemeral key
   as an implicit sender reference rather than a properly sealed
@@ -61,41 +52,26 @@ identity.ts into envelope.ts for real sealed-sender support.
 
 ## Phase 3 — Local Multi-Hop Routing (RFC-0007 §4, §5) — ✅ COMPLETE
 
-
-
-
 | Component | RFC reference | File | Status |
 |---|---|---|---|
 | Destination hints, signed routing advertisements, relay forwarding | RFC-0007 §4, §5 | `src/routing/routing.ts` | ✅ Done, 7 tests passing |
 
-
-
-
 **Known gaps, flagged deliberately:**
 - Sybil-resistant routing trust (RFC-0007 §6) is not implemented. A
-  routing advertisement's signature proves it came from who it claims,
-  not that the claim should be trusted over an untrusted new identity.
-  Deferred to whichever phase builds trust scoring.
+  routing advertisement's signature proves it came from who it claims,
+  not that the claim should be trusted over an untrusted new identity.
+  Deferred to whichever phase builds trust scoring.
 - Advertisement propagation is manually simulated one hop at a time in
-  tests, not automatic. A real mesh would have each node re-broadcast
-  what it's learned continuously; that behavior isn't in `RelayNode`
-  yet.
-
-## Phase 4 — Store and Forward (RFC-0007 §2, RFC-0009)
-⬜ Not started.
+  tests, not automatic. A real mesh would have each node re-broadcast
+  what it's learned continuously; that behavior isn't in `RelayNode`
+  yet.
 
 ## Phase 4 — Store and Forward (RFC-0007 §2, RFC-0009) — ✅ COMPLETE
-
-
-
 
 | Component | RFC reference | File | Status |
 |---|---|---|---|
 | Store-and-forward relay queue | RFC-0009 | `src/storage/store.ts` | ✅ Done, 11 tests passing |
 | Automatic delayed delivery on RelayNode | RFC-0007 §2 | `src/routing/routing.ts` | ✅ Integrated |
-
-
-
 
 Messages with no known route now queue instead of dropping, and are
 automatically forwarded the moment a route is learned, no resend
@@ -106,23 +82,50 @@ by something relays can't legitimately see would break metadata
 minimization to serve a fairness rule. Flagged as a deliberate
 reinterpretation of RFC-0009 §5, not an oversight.
 
-
-
-
 **Known gaps:**
 - Queue garbage collection is TTL-based only. RFC-0007 §7's
-  acknowledgment-triggered early cleanup isn't wired up yet, that
-  needs Ack packets actually flowing back through the mesh, which
-  isn't built.
+  acknowledgment-triggered early cleanup isn't wired up yet, that
+  needs Ack packets actually flowing back through the mesh, which
+  isn't built.
 - `getSummary()` (RFC-0009 §6, peer-to-peer queue sync) exists but
-  nothing calls it yet, no two queues have actually synced with each
-  other. That's Phase 6 (Internet Synchronization) territory.
+  nothing calls it yet, no two queues have actually synced with each
+  other. That's Phase 6 (Internet Synchronization) territory.
 
+## Phase 5 — Additional Transports (RFC-0008) — ✅ COMPLETE
 
+| Component | RFC reference | File | Status |
+|---|---|---|---|
+| Transport interface, simulated Bluetooth and Wi-Fi Direct | RFC-0008 §1, §2, §3 | `src/transport/transport.ts` | ✅ Done, 5 tests passing |
+| Fragmentation and reassembly | RFC-0006 §5 | `src/envelope/fragment.ts` | ✅ Done, 8 tests passing |
 
+**Real finding, not a hypothetical one:** the transport tests measured
+actual encoded byte size for the first time in this project, and
+caught that `envelope.ts`'s original string-keyed CBOR encoding
+(`{"dhPublicKey": ..., "ciphertext": ...}`) was too large to fit a
+realistic 200-byte BLE MTU even for a two-character message. Fixed by
+switching `envelope.ts` to positional (array-based) CBOR encoding, no
+field names travel on the wire, both sides already agree on order
+from the code. This answers RFC-0010 Section 3's open question about
+serialization format compactness with real evidence instead of a
+guess.
 
-## Phase 5 — Additional Transports (RFC-0008)
-⬜ Not started.
+Fragmentation (RFC-0006 §5) then closed the gap that same discovery
+exposed: the exact 220-character message that correctly failed to
+cross the simulated Bluetooth transport now succeeds, split into
+ordered pieces, reassembled on the far side in any arrival order, and
+decrypts correctly.
+
+**Known gaps:**
+- `RelayNode` (routing.ts) still forwards via direct in-process calls
+  between neighbors, not through a `Transport`. Wiring the two
+  together is a real architectural change, deliberately deferred:
+  `Transport.send()` only reports whether a send succeeded, it can't
+  hand back the recipient's eventual delivery outcome the way a
+  direct in-process call currently does, so this needs a rethink of
+  how delivery results are observed across the whole routing test
+  suite, not a quick patch.
+- Long range radio and Internet gateway transports (RFC-0008 §4, §5)
+  aren't modeled yet, only Bluetooth and Wi-Fi Direct.
 
 ## Phase 6 — Internet Synchronization (RFC-0003 §5, RFC-0009 §6)
 ⬜ Not started.
@@ -143,6 +146,7 @@ reinterpretation of RFC-0009 §5, not an oversight.
 | Phase 1 complete | 27 | + identity.ts |
 | Phase 3 complete | 34 | + routing.ts |
 | Phase 4 complete | 46 | + store.ts, util.ts consolidation |
+| Phase 5 complete | 59 | + transport.ts, fragment.ts, envelope.ts encoding fix |
 
 ---
 
@@ -158,13 +162,23 @@ reinterpretation of RFC-0009 §5, not an oversight.
   `cat node_modules/<package>/package.json | grep -A 40 exports`
   before writing import statements against it, rather than guessing
   from memory or documentation that may be for an older version.
+- **`cbor-x`'s `Encoder.encode()` reuses an internal buffer across
+  calls**, for performance. Every call site that uses the result
+  immediately, once, is fine. The moment code calls `.encode()`
+  repeatedly in a loop and reads the results back later (fragment.ts
+  was the first place this happened), later calls silently corrupt
+  earlier results sharing the same buffer. Fix: wrap every
+  `cbor.encode(...)` result in `Uint8Array.from(...)` to force an
+  independent copy. Applied in `envelope.ts` and `fragment.ts`.
 - Watch for autocorrect mangling package names in terminal commands
   (`@noble` -> `@nobles` has happened more than once), and for the
   mobile file-creation dialog occasionally creating a folder instead
-  of a file when a path is typed in one go, prefer `mkdir -p <dir> &&
-  touch <dir>/<file>` from the terminal over the New File button for
-  nested paths.
+  of a file, or a `.` turning into a `/`, when a path is typed in one
+  go, prefer `mkdir -p <dir> && touch <dir>/<file>` from the terminal
+  over the New File button for nested paths.
 
 ---
 
-*Last updated: Phase 1 complete, 27 tests passing. Next up: Phase 3, local multi-hop routing (RFC-0007 §4).*
+*Last updated: Phase 5 complete, 59 tests passing. Next up: either
+wiring Transport into RelayNode's real forwarding path, or Phase 6,
+Internet synchronization.*
