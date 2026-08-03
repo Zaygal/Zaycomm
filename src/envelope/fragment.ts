@@ -34,7 +34,13 @@ function encodeFragment(fragment: Fragment): Uint8Array {
     fragment.fragmentCount,
     fragment.data,
   ];
-  return cbor.encode(tuple);
+  // cbor-x's Encoder reuses an internal buffer across calls for
+  // performance. Every other call site in this project uses its
+  // result immediately, once. Fragmentation is the first place that
+  // encodes many results in a loop and reads them back later, so a
+  // copy here is required, not optional, or later fragments corrupt
+  // earlier ones sharing the same underlying buffer.
+  return Uint8Array.from(cbor.encode(tuple));
 }
 
 function decodeFragment(bytes: Uint8Array): Fragment {
