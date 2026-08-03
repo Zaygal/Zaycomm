@@ -116,16 +116,23 @@ ordered pieces, reassembled on the far side in any arrival order, and
 decrypts correctly.
 
 **Known gaps:**
-- `RelayNode` (routing.ts) still forwards via direct in-process calls
-  between neighbors, not through a `Transport`. Wiring the two
-  together is a real architectural change, deliberately deferred:
-  `Transport.send()` only reports whether a send succeeded, it can't
-  hand back the recipient's eventual delivery outcome the way a
-  direct in-process call currently does, so this needs a rethink of
-  how delivery results are observed across the whole routing test
-  suite, not a quick patch.
 - Long range radio and Internet gateway transports (RFC-0008 §4, §5)
   aren't modeled yet, only Bluetooth and Wi-Fi Direct.
+
+**Resolved since:** `RelayNode` now forwards through a real `Transport`
+instead of calling neighbors directly in-process (see below).
+
+## RelayNode / Transport wiring — ✅ COMPLETE
+
+`routing.ts` rewritten to send real bytes through `Transport.send()`.
+The sender no longer sees a full multi-hop delivery path in its
+return value, since a real transport can't report what a recipient
+did downstream, only whether its own send succeeded. This is treated
+as correct behavior, not a limitation: RFC-0002's metadata
+minimization principle says a node should only ever know its own
+immediate neighbor. Delivery is now observed via `onDelivered()`
+listeners registered at the destination node instead of path
+inspection at the sender.
 
 ## Phase 6 — Internet Synchronization (RFC-0003 §5, RFC-0009 §6)
 ⬜ Not started.
