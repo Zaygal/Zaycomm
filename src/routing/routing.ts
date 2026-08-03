@@ -1,17 +1,31 @@
 // src/routing/routing.ts
 // RFC-0007, Sections 2, 4, and 5: routing advertisements, multi-hop
-// forwarding, and now store-and-forward, RFC-0007 Section 2's
-// "store, carry, and forward" model. A relay no longer just drops a
-// message it has no live route for, it queues it (src/storage/store.ts)
-// and automatically retries delivery the moment a route becomes known,
-// whenever the next routing advertisement teaches it one.
+// forwarding, and store-and-forward. Now sends real bytes through a
+// Transport (RFC-0008 Section 1) instead of one node calling another
+// node's method directly in-process.
+//
+// One honest consequence: Transport.send() only reports whether a
+// send succeeded, it cannot hand back what the recipient eventually
+// did with those bytes, no real radio works that way. So this no
+// longer returns a full multi-hop delivery path the way the earlier
+// in-process simulation could. That is not a regression, a real mesh
+// genuinely cannot know that either, every node only ever knows its
+// own immediate predecessor, which is exactly the metadata
+// minimization RFC-0002 asks for. Observe actual delivery via
+// onDelivered() registered at the destination node instead.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { signMessage, verifySignature } from '../crypto/keys';
 import type { Identity } from '../identity/identity';
-import { type Envelope, validateRoutingHeader } from '../envelope/envelope';
+import {
+  type Envelope,
+  validateRoutingHeader,
+  encodeEnvelope,
+  decodeEnvelope,
+} from '../envelope/envelope';
 import { concatBytes, bytesEqual, bytesToHex, u64le } from '../util';
 import { StoreForwardQueue } from '../storage/store';
+import type { Transport } from '../transport/transport';
 
 const ROUTING_AD_CONTEXT = 'ZAYCOMM_ROUTING_AD_V1';
 const DESTINATION_HINT_LENGTH = 8;
@@ -67,26 +81,37 @@ class RoutingTable {
 }
 
 export type DeliveryResult =
-  | { outcome: 'delivered'; envelope: Envelope; path: string[] }
-  | { outcome: 'queued'; path: string[] }
-  | { outcome: 'dropped'; reason: string; path: string[] };
+  | { outcome: 'delivered'; envelope: Envelope }
+  | { outcome: 'forwarded'; to: string }
+  | { outcome: 'queued' }
+  | { outcome: 'dropped'; reason: string };
 
 export class RelayNode {
   readonly id: string;
   readonly identity: Identity;
-  private readonly neighbors = new Map<string, RelayNode>();
+  readonly transport: Transport;
   private readonly routingTable = new RoutingTable();
   private readonly queue = new StoreForwardQueue();
   private readonly ownDestinationHint: Uint8Array;
+  private deliveryListeners: ((envelope: Envelope) => void)[] = [];
 
-  constructor(id: string, identity: Identity) {
+  constructor(id: string, identity: Identity, transport: Transport) {
     this.id = id;
     this.identity = identity;
+    this.transport = transport;
     this.ownDestinationHint = computeDestinationHint(identity.publicKey);
+    this.transport.onReceive((fromNeighborId, frame) => {
+      const envelope = decodeEnvelope(frame);
+      this.receiveEnvelope(envelope, fromNeighborId);
+    });
   }
 
-  connectNeighbor(neighbor: RelayNode): void {
-    this.neighbors.set(neighbor.id, neighbor);
+  /** Registers a callback that fires when a message addressed to this
+   * node is actually delivered. This is how delivery gets observed
+   * now that a Transport boundary sits between hops, since the
+   * sender's own call can no longer see downstream outcomes. */
+  onDelivered(listener: (envelope: Envelope) => void): void {
+    this.deliveryListeners.push(listener);
   }
 
   hasRoute(destinationHint: Uint8Array): boolean {
@@ -99,75 +124,62 @@ export class RelayNode {
 
   /**
    * Learns a route, then immediately checks the local queue for
-   * anything addressed to a newly reachable destination, this is the
-   * actual "forward" half of "store, carry, and forward": no resend
-   * from the original sender required, delivery happens the moment a
-   * path appears.
+   * anything addressed to a newly reachable destination, RFC-0007
+   * Section 2's actual "forward" half of store, carry, and forward.
    */
-  receiveAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): DeliveryResult[] {
+  receiveAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): void {
     this.routingTable.learnFromAdvertisement(fromNeighborId, ad);
-    const results: DeliveryResult[] = [];
     for (const hint of ad.reachableDestinations) {
-      results.push(...this.attemptQueuedDelivery(hint));
+      this.attemptQueuedDelivery(hint);
     }
-    return results;
   }
 
-  private attemptQueuedDelivery(destinationHint: Uint8Array): DeliveryResult[] {
+  private attemptQueuedDelivery(destinationHint: Uint8Array): void {
     const nextHopId = this.routingTable.lookup(destinationHint);
-    if (!nextHopId || !this.neighbors.has(nextHopId)) return [];
-
-    const results: DeliveryResult[] = [];
+    if (!nextHopId) return;
     for (const envelope of this.queue.getByDestination(destinationHint)) {
-      const result = this.forward(envelope, nextHopId, [this.id]);
-      if (result.outcome !== 'dropped') {
-        this.queue.acknowledge(envelope.header.messageId);
-      }
-      results.push(result);
+      const sent = this.forwardOverTransport(envelope, nextHopId);
+      if (sent) this.queue.acknowledge(envelope.header.messageId);
     }
-    return results;
   }
 
-  private forward(envelope: Envelope, nextHopId: string, path: string[]): DeliveryResult {
-    const nextHop = this.neighbors.get(nextHopId)!;
+  private forwardOverTransport(envelope: Envelope, nextHopId: string): boolean {
     const forwardedEnvelope: Envelope = {
       header: { ...envelope.header, ttl: envelope.header.ttl - 1 },
       sealedPayload: envelope.sealedPayload,
     };
-    return nextHop.receiveEnvelope(forwardedEnvelope, this.id, path);
+    return this.transport.send(nextHopId, encodeEnvelope(forwardedEnvelope));
   }
 
   /**
-   * The core relay decision, now with store-and-forward. Still never
-   * touches envelope.sealedPayload, only envelope.header. The only
-   * change from Phase 3: "no route" no longer means "drop", it means
-   * "queue and wait" (RFC-0007 Section 2), unless the queue itself
-   * refuses it (full, forged, duplicate, or over quota).
+   * The core relay decision, RFC-0007 Sections 2 and 4. Still never
+   * touches envelope.sealedPayload, only envelope.header.
    */
-  receiveEnvelope(envelope: Envelope, fromNodeId: string | null, path: string[] = []): DeliveryResult {
-    const currentPath = [...path, this.id];
-
+  receiveEnvelope(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
     if (!validateRoutingHeader(envelope.header)) {
-      return { outcome: 'dropped', reason: 'invalid header', path: currentPath };
+      return { outcome: 'dropped', reason: 'invalid header' };
     }
 
     if (bytesEqual(envelope.header.destinationHint, this.ownDestinationHint)) {
-      return { outcome: 'delivered', envelope, path: currentPath };
+      for (const listener of this.deliveryListeners) listener(envelope);
+      return { outcome: 'delivered', envelope };
     }
 
     if (envelope.header.ttl <= 0) {
-      return { outcome: 'dropped', reason: 'ttl expired', path: currentPath };
+      return { outcome: 'dropped', reason: 'ttl expired' };
     }
 
     const nextHopId = this.routingTable.lookup(envelope.header.destinationHint);
-    if (nextHopId && this.neighbors.has(nextHopId)) {
-      return this.forward(envelope, nextHopId, currentPath);
+    if (nextHopId) {
+      const sent = this.forwardOverTransport(envelope, nextHopId);
+      if (sent) return { outcome: 'forwarded', to: nextHopId };
+      // Send failed (exceeds MTU, link down, etc), fall through to queueing.
     }
 
     const result = this.queue.store(envelope, fromNodeId ?? 'origin');
     if (result.stored) {
-      return { outcome: 'queued', path: currentPath };
+      return { outcome: 'queued' };
     }
-    return { outcome: 'dropped', reason: result.reason ?? 'unknown', path: currentPath };
+    return { outcome: 'dropped', reason: result.reason ?? 'unknown' };
   }
 }
