@@ -108,7 +108,7 @@ export function createDataEnvelope(
     ratchetHeader.messageNumber,
     ciphertext,
   ];
-  const sealedPayload = cbor.encode(sealedTuple);
+  const sealedPayload = Uint8Array.from(cbor.encode(sealedTuple));
 
   return { header, sealedPayload };
 }
@@ -135,7 +135,7 @@ export function openDataEnvelope(
 /** Serializes a full envelope for actual transmission over a transport. */
 export function encodeEnvelope(envelope: Envelope): Uint8Array {
   const tuple: EncodedEnvelopeTuple = [headerToTuple(envelope.header), envelope.sealedPayload];
-  return cbor.encode(tuple);
+  return Uint8Array.from(cbor.encode(tuple));
 }
 
 /** The transport-receiving mirror of encodeEnvelope. */
