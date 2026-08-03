@@ -91,11 +91,41 @@ reinterpretation of RFC-0009 §5, not an oversight.
   nothing calls it yet, no two queues have actually synced with each
   other. That's Phase 6 (Internet Synchronization) territory.
 
+## Phase 5 — Additional Transports (RFC-0008) — ✅ COMPLETE
 
+| Component | RFC reference | File | Status |
+|---|---|---|---|
+| Transport interface, simulated Bluetooth and Wi-Fi Direct | RFC-0008 §1, §2, §3 | `src/transport/transport.ts` | ✅ Done, 5 tests passing |
+| Fragmentation and reassembly | RFC-0006 §5 | `src/envelope/fragment.ts` | ✅ Done, 8 tests passing |
 
+**Real finding, not a hypothetical one:** the transport tests measured
+actual encoded byte size for the first time in this project, and
+caught that `envelope.ts`'s original string-keyed CBOR encoding
+(`{"dhPublicKey": ..., "ciphertext": ...}`) was too large to fit a
+realistic 200-byte BLE MTU even for a two-character message. Fixed by
+switching `envelope.ts` to positional (array-based) CBOR encoding, no
+field names travel on the wire, both sides already agree on order
+from the code. This answers RFC-0010 Section 3's open question about
+serialization format compactness with real evidence instead of a
+guess.
 
-## Phase 5 — Additional Transports (RFC-0008)
-⬜ Not started.
+Fragmentation (RFC-0006 §5) then closed the gap that same discovery
+exposed: the exact 220-character message that correctly failed to
+cross the simulated Bluetooth transport now succeeds, split into
+ordered pieces, reassembled on the far side in any arrival order, and
+decrypts correctly.
+
+**Known gaps:**
+- `RelayNode` (routing.ts) still forwards via direct in-process calls
+  between neighbors, not through a `Transport`. Wiring the two
+  together is a real architectural change, deliberately deferred:
+  `Transport.send()` only reports whether a send succeeded, it can't
+  hand back the recipient's eventual delivery outcome the way a
+  direct in-process call currently does, so this needs a rethink of
+  how delivery results are observed across the whole routing test
+  suite, not a quick patch.
+- Long range radio and Internet gateway transports (RFC-0008 §4, §5)
+  aren't modeled yet, only Bluetooth and Wi-Fi Direct.
 
 ## Phase 6 — Internet Synchronization (RFC-0003 §5, RFC-0009 §6)
 ⬜ Not started.
@@ -116,6 +146,7 @@ reinterpretation of RFC-0009 §5, not an oversight.
 | Phase 1 complete | 27 | + identity.ts |
 | Phase 3 complete | 34 | + routing.ts |
 | Phase 4 complete | 46 | + store.ts, util.ts consolidation |
+| Phase 5 complete | 59 | + transport.ts, fragment.ts, envelope.ts encoding fix |
 
 ---
 
