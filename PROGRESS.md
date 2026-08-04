@@ -147,6 +147,7 @@ decrypts correctly.
 | Phase 3 complete | 34 | + routing.ts |
 | Phase 4 complete | 46 | + store.ts, util.ts consolidation |
 | Phase 5 complete | 59 | + transport.ts, fragment.ts, envelope.ts encoding fix |
+| — | 58 | RelayNode wired to real Transport; consolidated 2 overlapping routing tests into 1 |
 
 ---
 

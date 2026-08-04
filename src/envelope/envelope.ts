@@ -145,7 +145,30 @@ export function decodeEnvelope(bytes: Uint8Array): Envelope {
 }
 
 /**
- * Validation order from RFC-0006 Section 7: version first, then TTL
+ * Wraps a pre-encoded sync sub-message (summary, request, or
+ * transfer, RFC-0009 Section 6) as a StoreForwardSync packet. Sync
+ * is always point-to-point between directly connected transport
+ * neighbors, never routed multi-hop, so destinationHint is unused
+ * here, a future relay-to-relay sync across the mesh would need real
+ * addressing, deferred rather than half-built now.
+ */
+export function createSyncEnvelope(payload: Uint8Array, ttl: number = DEFAULT_TTL): Envelope {
+  const header: RoutingHeader = {
+    version: PROTOCOL_VERSION,
+    packetType: PacketType.StoreForwardSync,
+    messageId: randomBytes(16),
+    ttl,
+    destinationHint: new Uint8Array(8),
+    timestamp: coarseTimestamp(),
+  };
+  return { header, sealedPayload: payload };
+}
+
+
+
+
+/**
+ * Validation order from RFC-0006 Section 7: version first, then TTL
  * and freshness, before anything else is trusted. Returns false
  * rather than throwing, receiving an invalid packet from the network
  * is an expected, routine event, not a bug in your own code, per the

@@ -85,5 +85,18 @@ export function createBluetoothTransport(ownId: string): SimulatedTransport {
 
 /** RFC-0008 Section 3: meaningfully larger MTU, better suited to full envelopes. */
 export function createWifiDirectTransport(ownId: string): SimulatedTransport {
-  return new SimulatedTransport('wifi-direct', ownId, 4096, 0.95);
+  return new SimulatedTransport('wifi-direct', ownId, 4096, 0.95);
+}
+
+
+
+
+/**
+ * RFC-0008 Section 5: very high effective range and bandwidth,
+ * generally strong reliability, never assumed present, never
+ * required, used opportunistically by gateway nodes (RFC-0003
+ * Section 5) whenever real Internet connectivity happens to exist.
+ */
+export function createInternetTransport(ownId: string): SimulatedTransport {
+  return new SimulatedTransport('internet', ownId, 65536, 0.99);
 }
