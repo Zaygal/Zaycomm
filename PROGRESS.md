@@ -134,8 +134,36 @@ immediate neighbor. Delivery is now observed via `onDelivered()`
 listeners registered at the destination node instead of path
 inspection at the sender.
 
-## Phase 6 — Internet Synchronization (RFC-0003 §5, RFC-0009 §6)
-⬜ Not started.
+## Phase 6 — Internet Synchronization (RFC-0003 §5, RFC-0009 §6) — ✅ COMPLETE
+
+
+
+
+| Component | RFC reference | File | Status |
+|---|---|---|---|
+| Internet transport | RFC-0008 §5 | `src/transport/transport.ts` | ✅ Done, createInternetTransport |
+| Gateway-to-gateway sync (summary/request/transfer) | RFC-0009 §6 | `src/routing/routing.ts` | ✅ Done, 5 tests passing |
+
+
+
+
+Two gateways exchange bounded summaries (message ids and TTL only,
+never content) first, then each requests only what it's actually
+missing, verified on the bandwidth-saving property itself: when both
+sides already fully overlap, no request/transfer round trip happens
+at all. A synced message arriving where a route already exists
+forwards immediately, reusing the same receiveEnvelope() logic every
+other message goes through.
+
+
+
+
+**Known gaps:**
+- `initiateSync()` is a manual trigger, RFC-0003 §5's "whenever a node
+  gains Internet connectivity" event is a session-lifecycle concern,
+  left to whatever calls this layer.
+- Sync is point-to-point between directly connected transport
+  neighbors only, not routed multi-hop across the mesh.
 
 ## Phase 7 — Extended Message Types (files, voice, broadcast)
 ⬜ Not started.
@@ -154,6 +182,8 @@ inspection at the sender.
 | Phase 3 complete | 34 | + routing.ts |
 | Phase 4 complete | 46 | + store.ts, util.ts consolidation |
 | Phase 5 complete | 59 | + transport.ts, fragment.ts, envelope.ts encoding fix |
+| — | 58 | RelayNode wired to real Transport |
+| Phase 6 complete | 63 | + sync protocol, createInternetTransport |
 | — | 58 | RelayNode wired to real Transport; consolidated 2 overlapping routing tests into 1 |
 
 ---
