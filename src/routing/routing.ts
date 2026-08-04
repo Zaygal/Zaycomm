@@ -1,31 +1,35 @@
 // src/routing/routing.ts
-// RFC-0007, Sections 2, 4, and 5: routing advertisements, multi-hop
-// forwarding, and store-and-forward. Now sends real bytes through a
-// Transport (RFC-0008 Section 1) instead of one node calling another
-// node's method directly in-process.
+// RFC-0007, Sections 2, 4, and 5, plus RFC-0009 Section 6.
 //
-// One honest consequence: Transport.send() only reports whether a
-// send succeeded, it cannot hand back what the recipient eventually
-// did with those bytes, no real radio works that way. So this no
-// longer returns a full multi-hop delivery path the way the earlier
-// in-process simulation could. That is not a regression, a real mesh
-// genuinely cannot know that either, every node only ever knows its
-// own immediate predecessor, which is exactly the metadata
-// minimization RFC-0002 asks for. Observe actual delivery via
-// onDelivered() registered at the destination node instead.
+// Sends real bytes through a Transport (RFC-0008) instead of one
+// node calling another directly in-process. The sender only ever
+// sees its own local outcome, not a full downstream path, that
+// matches real transport constraints and RFC-0002's metadata
+// minimization: a node should only know its own immediate neighbor.
+// Observe actual delivery via onDelivered() at the destination.
+//
+// Also implements gateway-to-gateway sync (RFC-0009 Section 6): a
+// three-message exchange, summary, request, transfer, so two nodes
+// with overlapping queues never redundantly resend what the other
+// side already has.
 
 import { sha256 } from '@noble/hashes/sha2.js';
+import { Encoder } from 'cbor-x';
 import { signMessage, verifySignature } from '../crypto/keys';
 import type { Identity } from '../identity/identity';
 import {
   type Envelope,
+  PacketType,
   validateRoutingHeader,
   encodeEnvelope,
   decodeEnvelope,
+  createSyncEnvelope,
 } from '../envelope/envelope';
 import { concatBytes, bytesEqual, bytesToHex, u64le } from '../util';
 import { StoreForwardQueue } from '../storage/store';
 import type { Transport } from '../transport/transport';
+
+const cbor = new Encoder();
 
 const ROUTING_AD_CONTEXT = 'ZAYCOMM_ROUTING_AD_V1';
 const DESTINATION_HINT_LENGTH = 8;
@@ -86,6 +90,11 @@ export type DeliveryResult =
   | { outcome: 'queued' }
   | { outcome: 'dropped'; reason: string };
 
+// Sync sub-message shapes (RFC-0009 Section 6). Positional, like
+// everything else on the wire, kind 0 = summary, 1 = request, 2 = transfer.
+type SyncSummaryEntry = [Uint8Array, number];
+type SyncPayloadTuple = [0, SyncSummaryEntry[]] | [1, Uint8Array[]] | [2, Uint8Array[]];
+
 export class RelayNode {
   readonly id: string;
   readonly identity: Identity;
@@ -106,10 +115,6 @@ export class RelayNode {
     });
   }
 
-  /** Registers a callback that fires when a message addressed to this
-   * node is actually delivered. This is how delivery gets observed
-   * now that a Transport boundary sits between hops, since the
-   * sender's own call can no longer see downstream outcomes. */
   onDelivered(listener: (envelope: Envelope) => void): void {
     this.deliveryListeners.push(listener);
   }
@@ -122,11 +127,6 @@ export class RelayNode {
     return this.queue.size();
   }
 
-  /**
-   * Learns a route, then immediately checks the local queue for
-   * anything addressed to a newly reachable destination, RFC-0007
-   * Section 2's actual "forward" half of store, carry, and forward.
-   */
   receiveAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): void {
     this.routingTable.learnFromAdvertisement(fromNeighborId, ad);
     for (const hint of ad.reachableDestinations) {
@@ -152,12 +152,68 @@ export class RelayNode {
   }
 
   /**
+   * Kicks off a sync handshake with a directly connected neighbor,
+   * sending our own queue summary. When to call this, "whenever a
+   * node gains Internet connectivity" per RFC-0003 Section 5, is an
+   * application/session-lifecycle decision, deliberately left to the
+   * caller rather than hardcoded here.
+   */
+  initiateSync(neighborId: string): void {
+    const entries: SyncSummaryEntry[] = this.queue.getSummary().map((e) => [e.messageId, e.ttlRemaining]);
+    const tuple: SyncPayloadTuple = [0, entries];
+    const summaryEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(tuple)));
+    this.transport.send(neighborId, encodeEnvelope(summaryEnvelope));
+  }
+
+  private handleSyncPacket(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
+    if (!fromNodeId) {
+      return { outcome: 'dropped', reason: 'sync packet with no sender' };
+    }
+
+    const tuple = cbor.decode(envelope.sealedPayload) as SyncPayloadTuple;
+
+    if (tuple[0] === 0) {
+      // Summary received: request whatever we don't already have.
+      const missingIds = tuple[1].filter(([id]) => !this.queue.has(id)).map(([id]) => id);
+      if (missingIds.length > 0) {
+        const requestTuple: SyncPayloadTuple = [1, missingIds];
+        const requestEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(requestTuple)));
+        this.transport.send(fromNodeId, encodeEnvelope(requestEnvelope));
+      }
+      return { outcome: 'delivered', envelope };
+    }
+
+    if (tuple[0] === 1) {
+      // Request received: send back exactly what was asked for, nothing more.
+      const requested = this.queue.getByIds(tuple[1]);
+      const wireEnvelopes = requested.map((e) => Uint8Array.from(encodeEnvelope(e)));
+      const transferTuple: SyncPayloadTuple = [2, wireEnvelopes];
+      const transferEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(transferTuple)));
+      this.transport.send(fromNodeId, encodeEnvelope(transferEnvelope));
+      return { outcome: 'delivered', envelope };
+    }
+
+    // Transfer received: feed each envelope through normal processing,
+    // the existing dedup, TTL, and quota logic all still apply, no
+    // special-cased storage path for synced messages.
+    for (const wireBytes of tuple[1]) {
+      const syncedEnvelope = decodeEnvelope(wireBytes);
+      this.receiveEnvelope(syncedEnvelope, fromNodeId);
+    }
+    return { outcome: 'delivered', envelope };
+  }
+
+  /**
    * The core relay decision, RFC-0007 Sections 2 and 4. Still never
-   * touches envelope.sealedPayload, only envelope.header.
+   * touches envelope.sealedPayload for Data packets, only the header.
    */
   receiveEnvelope(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
     if (!validateRoutingHeader(envelope.header)) {
       return { outcome: 'dropped', reason: 'invalid header' };
+    }
+
+    if (envelope.header.packetType === PacketType.StoreForwardSync) {
+      return this.handleSyncPacket(envelope, fromNodeId);
     }
 
     if (bytesEqual(envelope.header.destinationHint, this.ownDestinationHint)) {
@@ -173,7 +229,6 @@ export class RelayNode {
     if (nextHopId) {
       const sent = this.forwardOverTransport(envelope, nextHopId);
       if (sent) return { outcome: 'forwarded', to: nextHopId };
-      // Send failed (exceeds MTU, link down, etc), fall through to queueing.
     }
 
     const result = this.queue.store(envelope, fromNodeId ?? 'origin');
