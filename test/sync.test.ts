@@ -3,7 +3,7 @@
 import { describe, it, expect } from 'vitest';
 import { createIdentity } from '../src/identity/identity';
 import { createDataEnvelope } from '../src/envelope/envelope';
-import { RelayNode } from '../src/routing/routing';
+import { RelayNode, createRoutingAdvertisement, computeDestinationHint } from '../src/routing/routing';
 import { createInternetTransport, type SimulatedTransport } from '../src/transport/transport';
 
 const text = (s: string) => new TextEncoder().encode(s);
@@ -108,7 +108,6 @@ describe('Gateway sync (RFC-0009 Section 6)', () => {
       delivered = true;
     });
 
-    const { createRoutingAdvertisement, computeDestinationHint } = require('../src/routing/routing');
     const cHint = computeDestinationHint(c.identity.publicKey);
     const cAd = createRoutingAdvertisement(c.identity, [cHint]);
     b.receiveAdvertisement('c', cAd);
