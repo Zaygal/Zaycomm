@@ -71,14 +71,14 @@ function headerToTuple(header: RoutingHeader): EncodedHeaderTuple {
 }
 
 function tupleToHeader(tuple: EncodedHeaderTuple): RoutingHeader {
-  return {
-    version: tuple[0],
-    packetType: tuple[1],
-    messageId: tuple[2],
-    ttl: tuple[3],
-    destinationHint: tuple[4],
-    timestamp: tuple[5],
-  };
+  return {
+    version: tuple[0],
+    packetType: tuple[1],
+    messageId: Uint8Array.from(tuple[2]),
+    ttl: tuple[3],
+    destinationHint: Uint8Array.from(tuple[4]),
+    timestamp: tuple[5],
+  };
 }
 
 /**
