@@ -168,7 +168,25 @@ export function createSyncEnvelope(payload: Uint8Array, ttl: number = DEFAULT_TT
 
 
 /**
- * Validation order from RFC-0006 Section 7: version first, then TTL
+ * Wraps a signed broadcast payload (RFC-0006 Section 4, RFC-0001's
+ * emergency broadcast goal). No single destination, everyone is a
+ * recipient, so destinationHint is unused here, same convention as
+ * sync packets.
+ */
+export function createBroadcastEnvelope(payload: Uint8Array, ttl: number = DEFAULT_TTL): Envelope {
+  const header: RoutingHeader = {
+    version: PROTOCOL_VERSION,
+    packetType: PacketType.EmergencyBroadcast,
+    messageId: randomBytes(16),
+    ttl,
+    destinationHint: new Uint8Array(8),
+    timestamp: coarseTimestamp(),
+  };
+  return { header, sealedPayload: payload };
+}
+
+/**
+ * Validation order from RFC-0006 Section 7: version first, then TTL
  * and freshness, before anything else is trusted. Returns false
  * rather than throwing, receiving an invalid packet from the network
  * is an expected, routine event, not a bug in your own code, per the
