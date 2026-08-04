@@ -124,10 +124,19 @@ export class StoreForwardQueue {
     }));
   }
 
-  getByDestination(destinationHint: Uint8Array): Envelope[] {
+    getByDestination(destinationHint: Uint8Array): Envelope[] {
     const hex = bytesToHex(destinationHint);
     return Array.from(this.entries.values())
       .filter((e) => bytesToHex(e.envelope.header.destinationHint) === hex)
+      .map((e) => e.envelope);
+  }
+
+  /** Fetches specific envelopes by message id, used to answer a sync
+   * peer's request for exactly what it's missing (RFC-0009 Section 6). */
+  getByIds(messageIds: Uint8Array[]): Envelope[] {
+    const idSet = new Set(messageIds.map(bytesToHex));
+    return Array.from(this.entries.values())
+      .filter((e) => idSet.has(bytesToHex(e.envelope.header.messageId)))
       .map((e) => e.envelope);
   }
 }
