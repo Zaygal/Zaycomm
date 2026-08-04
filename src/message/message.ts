@@ -17,16 +17,19 @@ export interface DecodedApplicationMessage {
   payload: Uint8Array;
 }
 
-export function encodeTextMessage(text: string): Uint8Array {
-  const textBytes = new TextEncoder().encode(text);
-  const out = new Uint8Array(1 + textBytes.length);
-  out[0] = MessageType.Text;
-  out.set(textBytes, 1);
+export function wrapApplicationMessage(type: MessageType, payload: Uint8Array): Uint8Array {
+  const out = new Uint8Array(1 + payload.length);
+  out[0] = type;
+  out.set(payload, 1);
   return out;
 }
 
 export function decodeApplicationMessage(data: Uint8Array): DecodedApplicationMessage {
   return { type: data[0] as MessageType, payload: data.slice(1) };
+}
+
+export function encodeTextMessage(text: string): Uint8Array {
+  return wrapApplicationMessage(MessageType.Text, new TextEncoder().encode(text));
 }
 
 export function decodeTextMessage(data: Uint8Array): string {
