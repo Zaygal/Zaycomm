@@ -1,17 +1,13 @@
 // src/routing/routing.ts
-// RFC-0007, Sections 2, 4, and 5, plus RFC-0009 Section 6.
+// RFC-0007, Sections 2, 4, and 5, RFC-0009 Section 6, and RFC-0006
+// Section 4's emergency broadcast.
 //
 // Sends real bytes through a Transport (RFC-0008) instead of one
 // node calling another directly in-process. The sender only ever
 // sees its own local outcome, not a full downstream path, that
 // matches real transport constraints and RFC-0002's metadata
-// minimization: a node should only know its own immediate neighbor.
-// Observe actual delivery via onDelivered() at the destination.
-//
-// Also implements gateway-to-gateway sync (RFC-0009 Section 6): a
-// three-message exchange, summary, request, transfer, so two nodes
-// with overlapping queues never redundantly resend what the other
-// side already has.
+// minimization. Observe actual delivery via onDelivered(), and
+// broadcasts via onBroadcastReceived(), at the destination node.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { Encoder } from 'cbor-x';
@@ -24,15 +20,24 @@ import {
   encodeEnvelope,
   decodeEnvelope,
   createSyncEnvelope,
+  createBroadcastEnvelope,
 } from '../envelope/envelope';
 import { concatBytes, bytesEqual, bytesToHex, u64le } from '../util';
 import { StoreForwardQueue } from '../storage/store';
 import type { Transport } from '../transport/transport';
+import {
+  type BroadcastMessage,
+  createBroadcastMessage,
+  verifyBroadcastMessage,
+  encodeBroadcastMessage,
+  decodeBroadcastMessage,
+} from '../broadcast/broadcast';
 
 const cbor = new Encoder();
 
 const ROUTING_AD_CONTEXT = 'ZAYCOMM_ROUTING_AD_V1';
 const DESTINATION_HINT_LENGTH = 8;
+const DEFAULT_BROADCAST_TTL = 8;
 
 export function computeDestinationHint(publicKey: Uint8Array): Uint8Array {
   return sha256(publicKey).slice(0, DESTINATION_HINT_LENGTH);
@@ -88,10 +93,9 @@ export type DeliveryResult =
   | { outcome: 'delivered'; envelope: Envelope }
   | { outcome: 'forwarded'; to: string }
   | { outcome: 'queued' }
+  | { outcome: 'broadcast'; message: BroadcastMessage }
   | { outcome: 'dropped'; reason: string };
 
-// Sync sub-message shapes (RFC-0009 Section 6). Positional, like
-// everything else on the wire, kind 0 = summary, 1 = request, 2 = transfer.
 type SyncSummaryEntry = [Uint8Array, number];
 type SyncPayloadTuple = [0, SyncSummaryEntry[]] | [1, Uint8Array[]] | [2, Uint8Array[]];
 
@@ -103,6 +107,8 @@ export class RelayNode {
   private readonly queue = new StoreForwardQueue();
   private readonly ownDestinationHint: Uint8Array;
   private deliveryListeners: ((envelope: Envelope) => void)[] = [];
+  private broadcastListeners: ((message: BroadcastMessage) => void)[] = [];
+  private seenBroadcasts = new Map<string, number>();
 
   constructor(id: string, identity: Identity, transport: Transport) {
     this.id = id;
@@ -119,12 +125,39 @@ export class RelayNode {
     this.deliveryListeners.push(listener);
   }
 
+  onBroadcastReceived(listener: (message: BroadcastMessage) => void): void {
+    this.broadcastListeners.push(listener);
+  }
+
   hasRoute(destinationHint: Uint8Array): boolean {
     return this.routingTable.hasRoute(destinationHint);
   }
 
   queueSize(): number {
     return this.queue.size();
+  }
+
+  purgeStaleBroadcastRecords(maxAgeMs: number): number {
+    const now = Date.now();
+    let purged = 0;
+    for (const [key, seenAt] of this.seenBroadcasts) {
+      if (now - seenAt > maxAgeMs) {
+        this.seenBroadcasts.delete(key);
+        purged++;
+      }
+    }
+    return purged;
+  }
+
+  /** Originates a new broadcast, signs it, and floods it to every
+   * currently known neighbor. */
+  broadcast(content: Uint8Array, ttl: number = DEFAULT_BROADCAST_TTL): void {
+    const message = createBroadcastMessage(this.identity, content);
+    const envelope = createBroadcastEnvelope(encodeBroadcastMessage(message), ttl);
+    const wireBytes = encodeEnvelope(envelope);
+    for (const neighborId of this.transport.discoverNeighbors()) {
+      this.transport.send(neighborId, wireBytes);
+    }
   }
 
   receiveAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): void {
@@ -151,13 +184,6 @@ export class RelayNode {
     return this.transport.send(nextHopId, encodeEnvelope(forwardedEnvelope));
   }
 
-  /**
-   * Kicks off a sync handshake with a directly connected neighbor,
-   * sending our own queue summary. When to call this, "whenever a
-   * node gains Internet connectivity" per RFC-0003 Section 5, is an
-   * application/session-lifecycle decision, deliberately left to the
-   * caller rather than hardcoded here.
-   */
   initiateSync(neighborId: string): void {
     const entries: SyncSummaryEntry[] = this.queue.getSummary().map((e) => [e.messageId, e.ttlRemaining]);
     const tuple: SyncPayloadTuple = [0, entries];
@@ -173,7 +199,6 @@ export class RelayNode {
     const tuple = cbor.decode(envelope.sealedPayload) as SyncPayloadTuple;
 
     if (tuple[0] === 0) {
-      // Summary received: request whatever we don't already have.
       const missingIds = tuple[1].filter(([id]) => !this.queue.has(id)).map(([id]) => id);
       if (missingIds.length > 0) {
         const requestTuple: SyncPayloadTuple = [1, missingIds];
@@ -184,7 +209,6 @@ export class RelayNode {
     }
 
     if (tuple[0] === 1) {
-      // Request received: send back exactly what was asked for, nothing more.
       const requested = this.queue.getByIds(tuple[1]);
       const wireEnvelopes = requested.map((e) => Uint8Array.from(encodeEnvelope(e)));
       const transferTuple: SyncPayloadTuple = [2, wireEnvelopes];
@@ -193,9 +217,6 @@ export class RelayNode {
       return { outcome: 'delivered', envelope };
     }
 
-    // Transfer received: feed each envelope through normal processing,
-    // the existing dedup, TTL, and quota logic all still apply, no
-    // special-cased storage path for synced messages.
     for (const wireBytes of tuple[1]) {
       const syncedEnvelope = decodeEnvelope(wireBytes);
       this.receiveEnvelope(syncedEnvelope, fromNodeId);
@@ -204,9 +225,41 @@ export class RelayNode {
   }
 
   /**
-   * The core relay decision, RFC-0007 Sections 2 and 4. Still never
-   * touches envelope.sealedPayload for Data packets, only the header.
+   * Broadcasts are flooded, never routed to a single destination.
+   * Loop prevention: a message id already seen is dropped silently,
+   * never re-delivered locally and never re-flooded, otherwise a
+   * broadcast would circulate the mesh forever.
    */
+  private handleBroadcastPacket(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
+    const key = bytesToHex(envelope.header.messageId);
+    if (this.seenBroadcasts.has(key)) {
+      return { outcome: 'dropped', reason: 'broadcast already seen' };
+    }
+    this.seenBroadcasts.set(key, Date.now());
+
+    const message = decodeBroadcastMessage(envelope.sealedPayload);
+    if (!verifyBroadcastMessage(message)) {
+      return { outcome: 'dropped', reason: 'invalid broadcast signature' };
+    }
+
+    for (const listener of this.broadcastListeners) listener(message);
+
+    if (envelope.header.ttl > 0) {
+      const forwarded: Envelope = {
+        header: { ...envelope.header, ttl: envelope.header.ttl - 1 },
+        sealedPayload: envelope.sealedPayload,
+      };
+      const wireBytes = encodeEnvelope(forwarded);
+      for (const neighborId of this.transport.discoverNeighbors()) {
+        if (neighborId !== fromNodeId) {
+          this.transport.send(neighborId, wireBytes);
+        }
+      }
+    }
+
+    return { outcome: 'broadcast', message };
+  }
+
   receiveEnvelope(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
     if (!validateRoutingHeader(envelope.header)) {
       return { outcome: 'dropped', reason: 'invalid header' };
@@ -214,6 +267,10 @@ export class RelayNode {
 
     if (envelope.header.packetType === PacketType.StoreForwardSync) {
       return this.handleSyncPacket(envelope, fromNodeId);
+    }
+
+    if (envelope.header.packetType === PacketType.EmergencyBroadcast) {
+      return this.handleBroadcastPacket(envelope, fromNodeId);
     }
 
     if (bytesEqual(envelope.header.destinationHint, this.ownDestinationHint)) {
