@@ -47,6 +47,11 @@ export function encodeBroadcastMessage(message: BroadcastMessage): Uint8Array {
 }
 
 export function decodeBroadcastMessage(bytes: Uint8Array): BroadcastMessage {
-  const tuple = cbor.decode(bytes) as BroadcastTuple;
-  return { senderPublicKey: tuple[0], content: tuple[1], timestamp: tuple[2], signature: tuple[3] };
+  const tuple = cbor.decode(bytes) as BroadcastTuple;
+  return {
+    senderPublicKey: Uint8Array.from(tuple[0]),
+    content: Uint8Array.from(tuple[1]),
+    timestamp: tuple[2],
+    signature: Uint8Array.from(tuple[3]),
+  };
 }

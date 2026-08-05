@@ -140,8 +140,8 @@ export function encodeEnvelope(envelope: Envelope): Uint8Array {
 
 /** The transport-receiving mirror of encodeEnvelope. */
 export function decodeEnvelope(bytes: Uint8Array): Envelope {
-  const tuple = cbor.decode(bytes) as EncodedEnvelopeTuple;
-  return { header: tupleToHeader(tuple[0]), sealedPayload: tuple[1] };
+  const tuple = cbor.decode(bytes) as EncodedEnvelopeTuple;
+  return { header: tupleToHeader(tuple[0]), sealedPayload: Uint8Array.from(tuple[1]) };
 }
 
 /**

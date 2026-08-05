@@ -196,32 +196,43 @@ export class RelayNode {
       return { outcome: 'dropped', reason: 'sync packet with no sender' };
     }
 
-    const tuple = cbor.decode(envelope.sealedPayload) as SyncPayloadTuple;
+    const tuple = cbor.decode(envelope.sealedPayload) as SyncPayloadTuple;
 
-    if (tuple[0] === 0) {
-      const missingIds = tuple[1].filter(([id]) => !this.queue.has(id)).map(([id]) => id);
-      if (missingIds.length > 0) {
-        const requestTuple: SyncPayloadTuple = [1, missingIds];
-        const requestEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(requestTuple)));
-        this.transport.send(fromNodeId, encodeEnvelope(requestEnvelope));
-      }
-      return { outcome: 'delivered', envelope };
-    }
 
-    if (tuple[0] === 1) {
-      const requested = this.queue.getByIds(tuple[1]);
-      const wireEnvelopes = requested.map((e) => Uint8Array.from(encodeEnvelope(e)));
-      const transferTuple: SyncPayloadTuple = [2, wireEnvelopes];
-      const transferEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(transferTuple)));
-      this.transport.send(fromNodeId, encodeEnvelope(transferEnvelope));
-      return { outcome: 'delivered', envelope };
-    }
 
-    for (const wireBytes of tuple[1]) {
-      const syncedEnvelope = decodeEnvelope(wireBytes);
-      this.receiveEnvelope(syncedEnvelope, fromNodeId);
-    }
-    return { outcome: 'delivered', envelope };
+
+    if (tuple[0] === 0) {
+      const entries: SyncSummaryEntry[] = tuple[1].map(([id, ttl]) => [Uint8Array.from(id), ttl]);
+      const missingIds = entries.filter(([id]) => !this.queue.has(id)).map(([id]) => id);
+      if (missingIds.length > 0) {
+        const requestTuple: SyncPayloadTuple = [1, missingIds];
+        const requestEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(requestTuple)));
+        this.transport.send(fromNodeId, encodeEnvelope(requestEnvelope));
+      }
+      return { outcome: 'delivered', envelope };
+    }
+
+
+
+
+    if (tuple[0] === 1) {
+      const requestedIds = tuple[1].map((id) => Uint8Array.from(id));
+      const requested = this.queue.getByIds(requestedIds);
+      const wireEnvelopes = requested.map((e) => Uint8Array.from(encodeEnvelope(e)));
+      const transferTuple: SyncPayloadTuple = [2, wireEnvelopes];
+      const transferEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(transferTuple)));
+      this.transport.send(fromNodeId, encodeEnvelope(transferEnvelope));
+      return { outcome: 'delivered', envelope };
+    }
+
+
+
+
+    for (const wireBytes of tuple[1]) {
+      const syncedEnvelope = decodeEnvelope(Uint8Array.from(wireBytes));
+      this.receiveEnvelope(syncedEnvelope, fromNodeId);
+    }
+    return { outcome: 'delivered', envelope };
   }
 
   /**

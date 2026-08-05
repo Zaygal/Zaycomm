@@ -46,12 +46,17 @@ export function encodeFileChunkMessage(chunk: FileChunk): Uint8Array {
 }
 
 export function decodeFileChunkMessage(data: Uint8Array): FileChunk {
-  const { type, payload } = decodeApplicationMessage(data);
-  if (type !== MessageType.FileChunk) {
-    throw new Error(`Expected a file chunk message, got type ${type}`);
-  }
-  const tuple = cbor.decode(payload) as FileChunkTuple;
-  return { fileId: tuple[0], chunkIndex: tuple[1], chunkCount: tuple[2], data: tuple[3] };
+  const { type, payload } = decodeApplicationMessage(data);
+  if (type !== MessageType.FileChunk) {
+    throw new Error(`Expected a file chunk message, got type ${type}`);
+  }
+  const tuple = cbor.decode(payload) as FileChunkTuple;
+  return {
+    fileId: Uint8Array.from(tuple[0]),
+    chunkIndex: tuple[1],
+    chunkCount: tuple[2],
+    data: Uint8Array.from(tuple[3]),
+  };
 }
 
 /** Splits a file into ordered chunks sharing one random file id. */

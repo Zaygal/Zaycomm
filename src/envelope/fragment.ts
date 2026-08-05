@@ -44,8 +44,13 @@ function encodeFragment(fragment: Fragment): Uint8Array {
 }
 
 function decodeFragment(bytes: Uint8Array): Fragment {
-  const tuple = cbor.decode(bytes) as EncodedFragmentTuple;
-  return { messageId: tuple[0], fragmentIndex: tuple[1], fragmentCount: tuple[2], data: tuple[3] };
+  const tuple = cbor.decode(bytes) as EncodedFragmentTuple;
+  return {
+    messageId: Uint8Array.from(tuple[0]),
+    fragmentIndex: tuple[1],
+    fragmentCount: tuple[2],
+    data: Uint8Array.from(tuple[3]),
+  };
 }
 
 /**
