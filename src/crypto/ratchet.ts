@@ -1,59 +1,40 @@
 // src/crypto/ratchet.ts
 // RFC-0004, Section 2.4: Double Ratchet, Signal-style.
 //
-// The handshake (handshake.ts) gives you exactly one shared secret,
-// once. If every message in a conversation used that same secret,
-// compromising it once would expose every past and future message.
-// The double ratchet fixes this with two mechanisms stacked together:
+// Now includes the skipped-message-key cache that was flagged as
+// missing all the way back in Phase 1. Three separate things ran
+// into that gap: file chunking needed in-order-only delivery to work
+// around it, voice frames would have hit it on every single dropped
+// packet, and it's the one piece of the real Double Ratchet spec
+// this project was still missing. Fixed here rather than worked
+// around a third time.
 //
-//   1. Symmetric ratchet: every single message derives a brand new
-//      message key from a running "chain key", then advances the
-//      chain key forward. Even messages sent a second apart use
-//      different keys. This alone gives forward secrecy for the
-//      current chain.
-//
-//   2. Diffie Hellman ratchet: whenever the other party's ratchet
-//      public key changes (which happens on their next reply), both
-//      sides mix a fresh DH result into the root key and start new
-//      sending/receiving chains. This is what gives "post-compromise
-//      recovery": even if an attacker captures a chain key, they lose
-//      access again the moment the next DH ratchet step happens,
-//      because that step depends on fresh randomness they don't have.
-//
-// Both KDF_RK (root key derivation) and KDF_CK (chain key derivation)
-// are exactly the constructions from Signal's published Double Ratchet
-// specification, built from the same proven primitives as everywhere
-// else in this project: HKDF, HMAC, SHA-256.
+// How it works: when a message arrives ahead of where the receiver
+// expects, the chain key advances forward to that point, and every
+// key it passes along the way gets cached rather than discarded. If
+// an earlier, delayed message later shows up, its key is already
+// waiting, no re-derivation needed. The cache is bounded, a hard cap
+// on how far a single gap may skip, since unbounded growth here is a
+// real storage exhaustion vector per RFC-0002's threat catalog.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { hmac } from '@noble/hashes/hmac.js';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import {
-  generateX25519KeyPair,
-  deriveSharedSecret,
-  type X25519KeyPair,
+  generateX25519KeyPair,
+  deriveSharedSecret,
+  type X25519KeyPair,
 } from './keys';
-import { buildNonce, concatBytes, bytesEqual, u32le } from '../util';
+import { buildNonce, concatBytes, bytesEqual, u32le, bytesToHex } from '../util';
 
-/**
- * The root ratchet step. Takes the current root key and a fresh DH
- * result, returns a new root key plus a chain key to start a new
- * sending or receiving chain. This is literally HKDF (RFC-0004,
- * Section 2.6), root key as salt, DH output as input key material.
- */
+const MAX_SKIP = 1000;
+
 function kdfRootKey(rootKey: Uint8Array, dhOutput: Uint8Array): { rootKey: Uint8Array; chainKey: Uint8Array } {
   const output = hkdf(sha256, dhOutput, rootKey, new Uint8Array(0), 64);
   return { rootKey: output.slice(0, 32), chainKey: output.slice(32, 64) };
 }
 
-/**
- * The symmetric ratchet step. Advances a chain key forward one step,
- * producing a one-time message key along the way. Uses HMAC directly
- * (not full HKDF), this is exactly Signal's published construction,
- * two HMAC calls with different single-byte inputs, cheap enough to
- * run on every single message without it being a bottleneck.
- */
 function kdfChainKey(chainKey: Uint8Array): { messageKey: Uint8Array; nextChainKey: Uint8Array } {
   const messageKey = hmac(sha256, chainKey, new Uint8Array([0x01]));
   const nextChainKey = hmac(sha256, chainKey, new Uint8Array([0x02]));
@@ -79,6 +60,7 @@ export class DoubleRatchet {
   private sendMessageNumber = 0;
   private receiveMessageNumber = 0;
   private previousSendingChainLength = 0;
+  private skippedMessageKeys = new Map<string, Uint8Array>();
 
   private constructor(
     rootKey: Uint8Array,
@@ -94,13 +76,6 @@ export class DoubleRatchet {
     this.receivingChainKey = receivingChainKey;
   }
 
-  /**
-   * The initiator already knows the responder's ratchet public key
-   * the moment the handshake finishes (it arrived in message 2, per
-   * handshake.ts), so the initiator can perform one DH ratchet step
-   * immediately and has a sending chain ready to go without waiting
-   * for a reply.
-   */
   static initAsInitiator(rootKey: Uint8Array, remoteRatchetPublicKey: Uint8Array): DoubleRatchet {
     const dhSelf = generateX25519KeyPair();
     const dhOutput = deriveSharedSecret(dhSelf.privateKey, remoteRatchetPublicKey);
@@ -108,25 +83,42 @@ export class DoubleRatchet {
     return new DoubleRatchet(newRootKey, dhSelf, remoteRatchetPublicKey, chainKey, null);
   }
 
-  /**
-   * The responder has no sending chain yet, they don't know the
-   * initiator's next ratchet key until a message actually arrives.
-   * This is why, in the real protocol, the initiator always sends
-   * first, the responder's first ratchet step happens inside decrypt().
-   */
   static initAsResponder(rootKey: Uint8Array, ownRatchetKeyPair: X25519KeyPair): DoubleRatchet {
     return new DoubleRatchet(rootKey, ownRatchetKeyPair, null, null, null);
   }
 
-  /**
-   * Runs when a message arrives carrying a ratchet public key we
-   * haven't seen before. Two DH results get mixed in back to back:
-   * first using our OLD sending key against their new key (finishes
-   * our current receiving chain), then a freshly generated key of
-   * our own against their new key (starts our next sending chain).
-   * This asymmetry, old key first, then generate a new one, is what
-   * keeps both parties' ratchets advancing in lockstep.
-   */
+  private skipKey(dhPublicKey: Uint8Array, messageNumber: number): string {
+    return `${bytesToHex(dhPublicKey)}:${messageNumber}`;
+  }
+
+  /** Looks for a cached key from a previously skipped-ahead message.
+   * One-time use, removed once consumed. */
+  private trySkippedMessageKey(header: RatchetHeader): Uint8Array | null {
+    const key = this.skipKey(header.dhPublicKey, header.messageNumber);
+    const messageKey = this.skippedMessageKeys.get(key);
+    if (messageKey) {
+      this.skippedMessageKeys.delete(key);
+      return messageKey;
+    }
+    return null;
+  }
+
+  /** Advances the current receiving chain up to (not including)
+   * `until`, caching every key passed along the way. Bounded by
+   * MAX_SKIP, refuses rather than let the cache grow unbounded. */
+  private skipMessageKeysUntil(until: number): void {
+    if (this.receivingChainKey === null || this.dhRemote === null) return;
+    if (until - this.receiveMessageNumber > MAX_SKIP) {
+      throw new Error('Too many skipped messages in one gap, refusing to advance further.');
+    }
+    while (this.receiveMessageNumber < until) {
+      const { messageKey, nextChainKey } = kdfChainKey(this.receivingChainKey);
+      this.receivingChainKey = nextChainKey;
+      this.skippedMessageKeys.set(this.skipKey(this.dhRemote, this.receiveMessageNumber), messageKey);
+      this.receiveMessageNumber++;
+    }
+  }
+
   private performDhRatchetStep(remoteRatchetPublicKey: Uint8Array): void {
     this.previousSendingChainLength = this.sendMessageNumber;
     this.sendMessageNumber = 0;
@@ -143,9 +135,6 @@ export class DoubleRatchet {
     this.sendingChainKey = sendStep.chainKey;
   }
 
-  /** Encrypts one message. Every call advances the sending chain, so
-   * two calls in a row with identical plaintext still produce
-   * completely different ciphertext, different message key each time. */
   encrypt(plaintext: Uint8Array, associatedData: Uint8Array = new Uint8Array(0)): { header: RatchetHeader; ciphertext: Uint8Array } {
     if (this.sendingChainKey === null) {
       throw new Error('No sending chain established yet, the responder must wait for a message before it can reply.');
@@ -168,24 +157,41 @@ export class DoubleRatchet {
     return { header, ciphertext };
   }
 
-  /** Decrypts one message. Automatically triggers a DH ratchet step
-   * the first time it sees a new ratchet key from the other side. */
+  private openWithMessageKey(
+    messageKey: Uint8Array,
+    header: RatchetHeader,
+    ciphertext: Uint8Array,
+    associatedData: Uint8Array
+  ): Uint8Array {
+    const nonce = buildNonce(header.messageNumber);
+    const aad = concatBytes(encodeHeader(header), associatedData);
+    const cipher = xchacha20poly1305(messageKey, nonce, aad);
+    return cipher.decrypt(ciphertext);
+  }
+
   decrypt(header: RatchetHeader, ciphertext: Uint8Array, associatedData: Uint8Array = new Uint8Array(0)): Uint8Array {
+    const skippedKey = this.trySkippedMessageKey(header);
+    if (skippedKey) {
+      return this.openWithMessageKey(skippedKey, header, ciphertext, associatedData);
+    }
+
     if (this.dhRemote === null || !bytesEqual(header.dhPublicKey, this.dhRemote)) {
+      // Before abandoning the current receiving chain, cache keys for
+      // any messages from it that never arrived, per the header's own
+      // record of how many messages that chain contained.
+      this.skipMessageKeysUntil(header.previousChainLength);
       this.performDhRatchetStep(header.dhPublicKey);
     }
+
+    this.skipMessageKeysUntil(header.messageNumber);
+
     if (this.receivingChainKey === null) {
       throw new Error('No receiving chain established yet.');
     }
     const { messageKey, nextChainKey } = kdfChainKey(this.receivingChainKey);
     this.receivingChainKey = nextChainKey;
-
-    const nonce = buildNonce(header.messageNumber);
-    const aad = concatBytes(encodeHeader(header), associatedData);
-    const cipher = xchacha20poly1305(messageKey, nonce, aad);
-    const plaintext = cipher.decrypt(ciphertext);
-
     this.receiveMessageNumber++;
-    return plaintext;
+
+    return this.openWithMessageKey(messageKey, header, ciphertext, associatedData);
   }
 }
