@@ -1,13 +1,19 @@
 // src/routing/routing.ts
-// RFC-0007, Sections 2, 4, and 5, RFC-0009 Section 6, and RFC-0006
-// Section 4's emergency broadcast.
+// RFC-0007, Sections 2, 4, and 5, RFC-0009 Section 6, RFC-0006
+// Section 4's emergency broadcast, and RFC-0006 Section 5
+// fragmentation, now wired into the actual send path.
 //
-// Sends real bytes through a Transport (RFC-0008) instead of one
-// node calling another directly in-process. The sender only ever
-// sees its own local outcome, not a full downstream path, that
-// matches real transport constraints and RFC-0002's metadata
-// minimization. Observe actual delivery via onDelivered(), and
-// broadcasts via onBroadcastReceived(), at the destination node.
+// Every outbound send in RelayNode routes through one choke point,
+// sendEnvelopeOverTransport, which checks the destination's real MTU
+// and transparently fragments anything that doesn't fit, rather than
+// letting transport.send() silently fail the way it did before this.
+// That silent failure was the root cause of the ratchet desync bug
+// found during Phase 7's file chunking test.
+//
+// Known limitation, not hidden: fragmented sends aren't atomic. If
+// one fragment fails to send partway through, the receiver is left
+// with a permanently incomplete set, cleaned up eventually by
+// FragmentReassembler.purgeStale() rather than ever completing.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { Encoder } from 'cbor-x';
@@ -22,6 +28,7 @@ import {
   createSyncEnvelope,
   createBroadcastEnvelope,
 } from '../envelope/envelope';
+import { fragmentEnvelope, FragmentReassembler } from '../envelope/fragment';
 import { concatBytes, bytesEqual, bytesToHex, u64le } from '../util';
 import { StoreForwardQueue } from '../storage/store';
 import type { Transport } from '../transport/transport';
@@ -38,6 +45,9 @@ const cbor = new Encoder();
 const ROUTING_AD_CONTEXT = 'ZAYCOMM_ROUTING_AD_V1';
 const DESTINATION_HINT_LENGTH = 8;
 const DEFAULT_BROADCAST_TTL = 8;
+
+const FRAME_KIND_ENVELOPE = 0;
+const FRAME_KIND_FRAGMENT = 1;
 
 export function computeDestinationHint(publicKey: Uint8Array): Uint8Array {
   return sha256(publicKey).slice(0, DESTINATION_HINT_LENGTH);
@@ -105,6 +115,7 @@ export class RelayNode {
   readonly transport: Transport;
   private readonly routingTable = new RoutingTable();
   private readonly queue = new StoreForwardQueue();
+  private readonly reassembler = new FragmentReassembler();
   private readonly ownDestinationHint: Uint8Array;
   private deliveryListeners: ((envelope: Envelope) => void)[] = [];
   private broadcastListeners: ((message: BroadcastMessage) => void)[] = [];
@@ -116,7 +127,19 @@ export class RelayNode {
     this.transport = transport;
     this.ownDestinationHint = computeDestinationHint(identity.publicKey);
     this.transport.onReceive((fromNeighborId, frame) => {
-      const envelope = decodeEnvelope(frame);
+      if (frame.length === 0) return;
+      const kind = frame[0];
+      const body = frame.slice(1);
+
+      if (kind === FRAME_KIND_FRAGMENT) {
+        const reassembled = this.reassembler.addFragment(body);
+        if (reassembled) {
+          this.receiveEnvelope(reassembled, fromNeighborId);
+        }
+        return;
+      }
+
+      const envelope = decodeEnvelope(body);
       this.receiveEnvelope(envelope, fromNeighborId);
     });
   }
@@ -149,14 +172,39 @@ export class RelayNode {
     return purged;
   }
 
-  /** Originates a new broadcast, signs it, and floods it to every
-   * currently known neighbor. */
+  purgeStaleFragments(maxAgeMs: number): number {
+    return this.reassembler.purgeStale(maxAgeMs);
+  }
+
+  /**
+   * The single choke point for every outbound send. Checks the
+   * destination's real MTU (RFC-0008 Section 1) and transparently
+   * fragments (RFC-0006 Section 5) anything that doesn't fit, rather
+   * than letting a raw transport.send() silently fail.
+   */
+  private sendEnvelopeOverTransport(neighborId: string, envelope: Envelope): boolean {
+    const characteristics = this.transport.getLinkCharacteristics(neighborId);
+    const mtu = characteristics?.maxTransmissionUnit ?? Infinity;
+    const encoded = encodeEnvelope(envelope);
+
+    if (encoded.length + 1 <= mtu) {
+      return this.transport.send(neighborId, concatBytes(new Uint8Array([FRAME_KIND_ENVELOPE]), encoded));
+    }
+
+    const fragments = fragmentEnvelope(envelope, mtu - 1);
+    let allSent = true;
+    for (const fragment of fragments) {
+      const sent = this.transport.send(neighborId, concatBytes(new Uint8Array([FRAME_KIND_FRAGMENT]), fragment));
+      if (!sent) allSent = false;
+    }
+    return allSent;
+  }
+
   broadcast(content: Uint8Array, ttl: number = DEFAULT_BROADCAST_TTL): void {
     const message = createBroadcastMessage(this.identity, content);
     const envelope = createBroadcastEnvelope(encodeBroadcastMessage(message), ttl);
-    const wireBytes = encodeEnvelope(envelope);
     for (const neighborId of this.transport.discoverNeighbors()) {
-      this.transport.send(neighborId, wireBytes);
+      this.sendEnvelopeOverTransport(neighborId, envelope);
     }
   }
 
@@ -181,14 +229,14 @@ export class RelayNode {
       header: { ...envelope.header, ttl: envelope.header.ttl - 1 },
       sealedPayload: envelope.sealedPayload,
     };
-    return this.transport.send(nextHopId, encodeEnvelope(forwardedEnvelope));
+    return this.sendEnvelopeOverTransport(nextHopId, forwardedEnvelope);
   }
 
   initiateSync(neighborId: string): void {
     const entries: SyncSummaryEntry[] = this.queue.getSummary().map((e) => [e.messageId, e.ttlRemaining]);
     const tuple: SyncPayloadTuple = [0, entries];
     const summaryEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(tuple)));
-    this.transport.send(neighborId, encodeEnvelope(summaryEnvelope));
+    this.sendEnvelopeOverTransport(neighborId, summaryEnvelope);
   }
 
   private handleSyncPacket(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
@@ -196,51 +244,36 @@ export class RelayNode {
       return { outcome: 'dropped', reason: 'sync packet with no sender' };
     }
 
-    const tuple = cbor.decode(envelope.sealedPayload) as SyncPayloadTuple;
+    const tuple = cbor.decode(envelope.sealedPayload) as SyncPayloadTuple;
 
+    if (tuple[0] === 0) {
+      const entries: SyncSummaryEntry[] = tuple[1].map(([id, ttl]) => [Uint8Array.from(id), ttl]);
+      const missingIds = entries.filter(([id]) => !this.queue.has(id)).map(([id]) => id);
+      if (missingIds.length > 0) {
+        const requestTuple: SyncPayloadTuple = [1, missingIds];
+        const requestEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(requestTuple)));
+        this.sendEnvelopeOverTransport(fromNodeId, requestEnvelope);
+      }
+      return { outcome: 'delivered', envelope };
+    }
 
+    if (tuple[0] === 1) {
+      const requestedIds = tuple[1].map((id) => Uint8Array.from(id));
+      const requested = this.queue.getByIds(requestedIds);
+      const wireEnvelopes = requested.map((e) => Uint8Array.from(encodeEnvelope(e)));
+      const transferTuple: SyncPayloadTuple = [2, wireEnvelopes];
+      const transferEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(transferTuple)));
+      this.sendEnvelopeOverTransport(fromNodeId, transferEnvelope);
+      return { outcome: 'delivered', envelope };
+    }
 
-
-    if (tuple[0] === 0) {
-      const entries: SyncSummaryEntry[] = tuple[1].map(([id, ttl]) => [Uint8Array.from(id), ttl]);
-      const missingIds = entries.filter(([id]) => !this.queue.has(id)).map(([id]) => id);
-      if (missingIds.length > 0) {
-        const requestTuple: SyncPayloadTuple = [1, missingIds];
-        const requestEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(requestTuple)));
-        this.transport.send(fromNodeId, encodeEnvelope(requestEnvelope));
-      }
-      return { outcome: 'delivered', envelope };
-    }
-
-
-
-
-    if (tuple[0] === 1) {
-      const requestedIds = tuple[1].map((id) => Uint8Array.from(id));
-      const requested = this.queue.getByIds(requestedIds);
-      const wireEnvelopes = requested.map((e) => Uint8Array.from(encodeEnvelope(e)));
-      const transferTuple: SyncPayloadTuple = [2, wireEnvelopes];
-      const transferEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(transferTuple)));
-      this.transport.send(fromNodeId, encodeEnvelope(transferEnvelope));
-      return { outcome: 'delivered', envelope };
-    }
-
-
-
-
-    for (const wireBytes of tuple[1]) {
-      const syncedEnvelope = decodeEnvelope(Uint8Array.from(wireBytes));
-      this.receiveEnvelope(syncedEnvelope, fromNodeId);
-    }
-    return { outcome: 'delivered', envelope };
+    for (const wireBytes of tuple[1]) {
+      const syncedEnvelope = decodeEnvelope(Uint8Array.from(wireBytes));
+      this.receiveEnvelope(syncedEnvelope, fromNodeId);
+    }
+    return { outcome: 'delivered', envelope };
   }
 
-  /**
-   * Broadcasts are flooded, never routed to a single destination.
-   * Loop prevention: a message id already seen is dropped silently,
-   * never re-delivered locally and never re-flooded, otherwise a
-   * broadcast would circulate the mesh forever.
-   */
   private handleBroadcastPacket(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
     const key = bytesToHex(envelope.header.messageId);
     if (this.seenBroadcasts.has(key)) {
@@ -260,10 +293,9 @@ export class RelayNode {
         header: { ...envelope.header, ttl: envelope.header.ttl - 1 },
         sealedPayload: envelope.sealedPayload,
       };
-      const wireBytes = encodeEnvelope(forwarded);
       for (const neighborId of this.transport.discoverNeighbors()) {
         if (neighborId !== fromNodeId) {
-          this.transport.send(neighborId, wireBytes);
+          this.sendEnvelopeOverTransport(neighborId, forwarded);
         }
       }
     }
