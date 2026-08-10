@@ -1,19 +1,14 @@
 // src/routing/routing.ts
-// RFC-0007, Sections 2, 4, and 5, RFC-0009 Section 6, RFC-0006
+// RFC-0007, Sections 2, 4, 5, and 7, RFC-0009 Section 6, RFC-0006
 // Section 4's emergency broadcast, and RFC-0006 Section 5
-// fragmentation, now wired into the actual send path.
+// fragmentation, wired into the actual send path.
 //
-// Every outbound send in RelayNode routes through one choke point,
-// sendEnvelopeOverTransport, which checks the destination's real MTU
-// and transparently fragments anything that doesn't fit, rather than
-// letting transport.send() silently fail the way it did before this.
-// That silent failure was the root cause of the ratchet desync bug
-// found during Phase 7's file chunking test.
-//
-// Known limitation, not hidden: fragmented sends aren't atomic. If
-// one fragment fails to send partway through, the receiver is left
-// with a permanently incomplete set, cleaned up eventually by
-// FragmentReassembler.purgeStale() rather than ever completing.
+// Ack sending (RFC-0007 Section 7) is deliberately NOT automatic
+// inside receiveEnvelope. RelayNode never decrypts anything, sealed
+// sender (identity/seal.ts) hid the original sender from the routing
+// layer on purpose. Only the application layer, which decrypts and
+// reads the sealed sender field, actually knows who to acknowledge.
+// So sendAck() is called explicitly from there, not triggered here.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { Encoder } from 'cbor-x';
@@ -27,6 +22,7 @@ import {
   decodeEnvelope,
   createSyncEnvelope,
   createBroadcastEnvelope,
+  createAckEnvelope,
 } from '../envelope/envelope';
 import { fragmentEnvelope, FragmentReassembler } from '../envelope/fragment';
 import { concatBytes, bytesEqual, bytesToHex, u64le } from '../util';
@@ -119,6 +115,7 @@ export class RelayNode {
   private readonly ownDestinationHint: Uint8Array;
   private deliveryListeners: ((envelope: Envelope) => void)[] = [];
   private broadcastListeners: ((message: BroadcastMessage) => void)[] = [];
+  private ackListeners: ((acknowledgedMessageId: Uint8Array) => void)[] = [];
   private seenBroadcasts = new Map<string, number>();
 
   constructor(id: string, identity: Identity, transport: Transport) {
@@ -152,6 +149,15 @@ export class RelayNode {
     this.broadcastListeners.push(listener);
   }
 
+  /** RFC-0007 Section 7. Fires when this node receives an ack for a
+   * message it previously sent. Triggering an ack in the other
+   * direction is explicit, see sendAck(), never automatic, since
+   * RelayNode itself never learns who to thank, only decrypted
+   * application content (via sealed sender) does. */
+  onAckReceived(listener: (acknowledgedMessageId: Uint8Array) => void): void {
+    this.ackListeners.push(listener);
+  }
+
   hasRoute(destinationHint: Uint8Array): boolean {
     return this.routingTable.hasRoute(destinationHint);
   }
@@ -176,12 +182,14 @@ export class RelayNode {
     return this.reassembler.purgeStale(maxAgeMs);
   }
 
-  /**
-   * The single choke point for every outbound send. Checks the
-   * destination's real MTU (RFC-0008 Section 1) and transparently
-   * fragments (RFC-0006 Section 5) anything that doesn't fit, rather
-   * than letting a raw transport.send() silently fail.
-   */
+  /** Sends a delivery acknowledgment toward destinationHint, reusing
+   * the exact same routing (forward if a route exists, queue if not)
+   * that any other message uses, no special casing. */
+  sendAck(destinationHint: Uint8Array, acknowledgedMessageId: Uint8Array): void {
+    const ackEnvelope = createAckEnvelope(destinationHint, acknowledgedMessageId);
+    this.receiveEnvelope(ackEnvelope, null);
+  }
+
   private sendEnvelopeOverTransport(neighborId: string, envelope: Envelope): boolean {
     const characteristics = this.transport.getLinkCharacteristics(neighborId);
     const mtu = characteristics?.maxTransmissionUnit ?? Infinity;
@@ -317,7 +325,11 @@ export class RelayNode {
     }
 
     if (bytesEqual(envelope.header.destinationHint, this.ownDestinationHint)) {
-      for (const listener of this.deliveryListeners) listener(envelope);
+      if (envelope.header.packetType === PacketType.Ack) {
+        for (const listener of this.ackListeners) listener(envelope.sealedPayload);
+      } else {
+        for (const listener of this.deliveryListeners) listener(envelope);
+      }
       return { outcome: 'delivered', envelope };
     }
 
