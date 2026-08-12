@@ -1,14 +1,18 @@
 // src/routing/routing.ts
-// RFC-0007, Sections 2, 4, 5, and 7, RFC-0009 Section 6, RFC-0006
+// RFC-0007, Sections 2, 4, 5, 6, and 7, RFC-0009 Section 6, RFC-0006
 // Section 4's emergency broadcast, and RFC-0006 Section 5
 // fragmentation, wired into the actual send path.
 //
-// Ack sending (RFC-0007 Section 7) is deliberately NOT automatic
-// inside receiveEnvelope. RelayNode never decrypts anything, sealed
-// sender (identity/seal.ts) hid the original sender from the routing
-// layer on purpose. Only the application layer, which decrypts and
-// reads the sealed sender field, actually knows who to acknowledge.
-// So sendAck() is called explicitly from there, not triggered here.
+// RFC-0007 Section 6: RoutingTable now remembers EVERY neighbor that
+// has ever advertised reachability to a destination, not just the
+// most recent one, and picks among them by earned trust rather than
+// recency. Before this, a single Map overwrite meant a freshly
+// created Sybil identity could silently hijack an already-proven
+// route just by advertising later, no signature needed breaking.
+// Trust is earned the only honest way this codebase can observe end
+// to end: a neighbor a message was routed through gets credited when
+// an ack for that exact message id comes back. A neighbor never
+// observed delivering anything starts at zero and stays there.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { Encoder } from 'cbor-x';
@@ -41,6 +45,7 @@ const cbor = new Encoder();
 const ROUTING_AD_CONTEXT = 'ZAYCOMM_ROUTING_AD_V1';
 const DESTINATION_HINT_LENGTH = 8;
 const DEFAULT_BROADCAST_TTL = 8;
+const MAX_PENDING_ACKS = 500;
 
 const FRAME_KIND_ENVELOPE = 0;
 const FRAME_KIND_FRAGMENT = 1;
@@ -77,21 +82,46 @@ export function verifyRoutingAdvertisement(ad: RoutingAdvertisement): boolean {
 }
 
 class RoutingTable {
-  private routes = new Map<string, string>();
+  private routes = new Map<string, Map<string, number>>();
 
   learnFromAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): void {
     if (!verifyRoutingAdvertisement(ad)) return;
     for (const hint of ad.reachableDestinations) {
-      this.routes.set(bytesToHex(hint), fromNeighborId);
+      const hintHex = bytesToHex(hint);
+      let candidates = this.routes.get(hintHex);
+      if (!candidates) {
+        candidates = new Map();
+        this.routes.set(hintHex, candidates);
+      }
+      candidates.set(fromNeighborId, Date.now());
     }
   }
 
-  lookup(destinationHint: Uint8Array): string | null {
-    return this.routes.get(bytesToHex(destinationHint)) ?? null;
+  /**
+   * Picks the best next hop among every neighbor that has ever
+   * advertised reachability to this destination, preferring the
+   * highest observed trust score, not whichever advertised most
+   * recently.
+   */
+  lookup(destinationHint: Uint8Array, trustScores: Map<string, number>): string | null {
+    const candidates = this.routes.get(bytesToHex(destinationHint));
+    if (!candidates || candidates.size === 0) return null;
+
+    let best: string | null = null;
+    let bestScore = -Infinity;
+    for (const neighborId of candidates.keys()) {
+      const score = trustScores.get(neighborId) ?? 0;
+      if (score > bestScore) {
+        bestScore = score;
+        best = neighborId;
+      }
+    }
+    return best;
   }
 
   hasRoute(destinationHint: Uint8Array): boolean {
-    return this.routes.has(bytesToHex(destinationHint));
+    const candidates = this.routes.get(bytesToHex(destinationHint));
+    return !!candidates && candidates.size > 0;
   }
 }
 
@@ -117,6 +147,8 @@ export class RelayNode {
   private broadcastListeners: ((message: BroadcastMessage) => void)[] = [];
   private ackListeners: ((acknowledgedMessageId: Uint8Array) => void)[] = [];
   private seenBroadcasts = new Map<string, number>();
+  private neighborTrust = new Map<string, number>();
+  private pendingAcks = new Map<string, string>();
 
   constructor(id: string, identity: Identity, transport: Transport) {
     this.id = id;
@@ -149,11 +181,6 @@ export class RelayNode {
     this.broadcastListeners.push(listener);
   }
 
-  /** RFC-0007 Section 7. Fires when this node receives an ack for a
-   * message it previously sent. Triggering an ack in the other
-   * direction is explicit, see sendAck(), never automatic, since
-   * RelayNode itself never learns who to thank, only decrypted
-   * application content (via sealed sender) does. */
   onAckReceived(listener: (acknowledgedMessageId: Uint8Array) => void): void {
     this.ackListeners.push(listener);
   }
@@ -164,6 +191,14 @@ export class RelayNode {
 
   queueSize(): number {
     return this.queue.size();
+  }
+
+  /** Zero for any neighbor never observed delivering anything, per
+   * RFC-0007 Section 6: new or unverified identities start with low
+   * routing trust and earn priority only through observed reliable
+   * behavior over time. */
+  neighborTrustScore(neighborId: string): number {
+    return this.neighborTrust.get(neighborId) ?? 0;
   }
 
   purgeStaleBroadcastRecords(maxAgeMs: number): number {
@@ -182,12 +217,17 @@ export class RelayNode {
     return this.reassembler.purgeStale(maxAgeMs);
   }
 
-  /** Sends a delivery acknowledgment toward destinationHint, reusing
-   * the exact same routing (forward if a route exists, queue if not)
-   * that any other message uses, no special casing. */
   sendAck(destinationHint: Uint8Array, acknowledgedMessageId: Uint8Array): void {
     const ackEnvelope = createAckEnvelope(destinationHint, acknowledgedMessageId);
     this.receiveEnvelope(ackEnvelope, null);
+  }
+
+  private recordPendingAck(messageId: Uint8Array, neighborId: string): void {
+    if (this.pendingAcks.size >= MAX_PENDING_ACKS) {
+      const oldestKey = this.pendingAcks.keys().next().value;
+      if (oldestKey !== undefined) this.pendingAcks.delete(oldestKey);
+    }
+    this.pendingAcks.set(bytesToHex(messageId), neighborId);
   }
 
   private sendEnvelopeOverTransport(neighborId: string, envelope: Envelope): boolean {
@@ -224,7 +264,7 @@ export class RelayNode {
   }
 
   private attemptQueuedDelivery(destinationHint: Uint8Array): void {
-    const nextHopId = this.routingTable.lookup(destinationHint);
+    const nextHopId = this.routingTable.lookup(destinationHint, this.neighborTrust);
     if (!nextHopId) return;
     for (const envelope of this.queue.getByDestination(destinationHint)) {
       const sent = this.forwardOverTransport(envelope, nextHopId);
@@ -237,7 +277,11 @@ export class RelayNode {
       header: { ...envelope.header, ttl: envelope.header.ttl - 1 },
       sealedPayload: envelope.sealedPayload,
     };
-    return this.sendEnvelopeOverTransport(nextHopId, forwardedEnvelope);
+    const sent = this.sendEnvelopeOverTransport(nextHopId, forwardedEnvelope);
+    if (sent && envelope.header.packetType === PacketType.Data) {
+      this.recordPendingAck(envelope.header.messageId, nextHopId);
+    }
+    return sent;
   }
 
   initiateSync(neighborId: string): void {
@@ -326,6 +370,12 @@ export class RelayNode {
 
     if (bytesEqual(envelope.header.destinationHint, this.ownDestinationHint)) {
       if (envelope.header.packetType === PacketType.Ack) {
+        const ackedIdHex = bytesToHex(envelope.sealedPayload);
+        const creditedNeighbor = this.pendingAcks.get(ackedIdHex);
+        if (creditedNeighbor) {
+          this.neighborTrust.set(creditedNeighbor, (this.neighborTrust.get(creditedNeighbor) ?? 0) + 1);
+          this.pendingAcks.delete(ackedIdHex);
+        }
         for (const listener of this.ackListeners) listener(envelope.sealedPayload);
       } else {
         for (const listener of this.deliveryListeners) listener(envelope);
@@ -337,7 +387,7 @@ export class RelayNode {
       return { outcome: 'dropped', reason: 'ttl expired' };
     }
 
-    const nextHopId = this.routingTable.lookup(envelope.header.destinationHint);
+    const nextHopId = this.routingTable.lookup(envelope.header.destinationHint, this.neighborTrust);
     if (nextHopId) {
       const sent = this.forwardOverTransport(envelope, nextHopId);
       if (sent) return { outcome: 'forwarded', to: nextHopId };
