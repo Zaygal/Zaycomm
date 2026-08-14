@@ -1,5 +1,7 @@
 # Zaycomm Protocol: Complete RFC Series
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Version](https://img.shields.io/badge/version-v1.0-blue)](https://github.com/yourusername/Zaycomm/releases/tag/v1.0)
+[![Tests](https://img.shields.io/badge/tests-104%20passing-brightgreen)](https://github.com/yourusername/Zaycomm)
 ## A Roadmap for a Secure, Decentralized, Transport Agnostic Mesh Communication Protocol
 
 This document combines RFC 0001 through RFC 0010 of the Zaycomm project into a single reference, intended to be used as a build roadmap. Each original RFC remains intact and in order below; nothing has been shortened or altered from the individually issued versions except for the addition of a small number of architecture diagrams at points where a visual helps tie sections together. Cross references between sections (for example, "per RFC 0004, Section 2.3") still work exactly as written, since the numbering scheme is unchanged.
