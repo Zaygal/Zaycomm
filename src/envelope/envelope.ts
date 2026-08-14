@@ -168,6 +168,32 @@ export function createSyncEnvelope(payload: Uint8Array, ttl: number = DEFAULT_TT
 
 
 /**
+ * RFC-0006 Section 4, RFC-0007 Section 7: acknowledges receipt of a
+ * specific message id, addressed back to whoever should learn their
+ * message arrived. Uses the exact same point-to-point routing as any
+ * Data packet, no special casing needed at the transport or routing
+ * layer.
+ */
+export function createAckEnvelope(
+  destinationHint: Uint8Array,
+  acknowledgedMessageId: Uint8Array,
+  ttl: number = DEFAULT_TTL
+): Envelope {
+  const header: RoutingHeader = {
+    version: PROTOCOL_VERSION,
+    packetType: PacketType.Ack,
+    messageId: randomBytes(16),
+    ttl,
+    destinationHint,
+    timestamp: coarseTimestamp(),
+  };
+  return { header, sealedPayload: acknowledgedMessageId };
+}
+
+
+
+
+/**
  * RFC-0006 Section 4, RFC-0007 Section 7: acknowledges receipt of a
  * specific message id, addressed back to whoever should learn their
  * message arrived. Uses the exact same point-to-point routing as any
@@ -191,7 +217,7 @@ export function createAckEnvelope(
 }
 
 /**
- * Wraps a signed broadcast payload (RFC-0006 Section 4, RFC-0001's
+ * Wraps a signed broadcast payload (RFC-0006 Section 4, RFC-0001's
  * emergency broadcast goal). No single destination, everyone is a
  * recipient, so destinationHint is unused here, same convention as
  * sync packets.

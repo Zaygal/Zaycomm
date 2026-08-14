@@ -12,7 +12,7 @@ import {
 import { createDataEnvelope, openDataEnvelope } from '../src/envelope/envelope';
 import { RelayNode, computeDestinationHint, createRoutingAdvertisement } from '../src/routing/routing';
 import { createIdentity } from '../src/identity/identity';
-import { createBluetoothTransport, type SimulatedTransport } from '../src/transport/transport';
+import { createWifiDirectTransport, type SimulatedTransport } from '../src/transport/transport';
 import {
   splitFileIntoChunks,
   FileReassembler,
@@ -96,9 +96,19 @@ describe('File chunking (RFC-0003 Section 7)', () => {
       const aliceRatchet = DoubleRatchet.initAsInitiator(aliceHandshakeResult.rootKey, msg2.ephemeralPublicKey);
       const bobRatchet = DoubleRatchet.initAsResponder(bobHandshakeResult.rootKey, initialRatchetKeyPair);
 
-      const aliceNode = new RelayNode('alice', aliceIdentity, createBluetoothTransport('alice'));
-      const relayNode = new RelayNode('relay', createIdentity(), createBluetoothTransport('relay'));
-      const bobNode = new RelayNode('bob', bobIdentity, createBluetoothTransport('bob'));
+      // Wi-Fi Direct, not Bluetooth: a chunked file's full envelope
+      // overhead (CBOR framing, ratchet header, routing header) does
+      // not reliably fit a realistic BLE MTU without RFC-0006 Section
+      // 5 fragmentation wired into the transport send path, which
+      // isn't built yet, flagged as a further integration gap. Using
+      // it anyway here silently desyncs the ratchet's receiving
+      // chain when a message fails to send, corrupting a LATER,
+      // seemingly unrelated chunk instead of failing where the real
+      // problem is. Wi-Fi Direct's larger MTU sidesteps that
+      // entirely, keeping this test focused on file chunking itself.
+      const aliceNode = new RelayNode('alice', aliceIdentity, createWifiDirectTransport('alice'));
+      const relayNode = new RelayNode('relay', createIdentity(), createWifiDirectTransport('relay'));
+      const bobNode = new RelayNode('bob', bobIdentity, createWifiDirectTransport('bob'));
       connectNodes(aliceNode, relayNode);
       connectNodes(relayNode, bobNode);
 
@@ -108,8 +118,8 @@ describe('File chunking (RFC-0003 Section 7)', () => {
       aliceNode.receiveAdvertisement('relay', bobAd);
 
       const originalFile = new Uint8Array(350).map((_, i) => i % 256);
-      const chunks = splitFileIntoChunks(originalFile, 1000); // temporary: forces exactly 1 chunk
-      // expect(chunks.length).toBeGreaterThan(1); // temporarily disabled for this diagnostic run
+      const chunks = splitFileIntoChunks(originalFile, 100);
+      expect(chunks.length).toBeGreaterThan(1);
 
       const reassembler = new FileReassembler();
       let reassembledFile: Uint8Array | null = null;

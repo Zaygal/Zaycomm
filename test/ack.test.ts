@@ -1,0 +1,107 @@
+// test/ack.test.ts
+
+import { describe, it, expect } from 'vitest';
+import { generateX25519KeyPair } from '../src/crypto/keys';
+import { DoubleRatchet } from '../src/crypto/ratchet';
+import {
+  initiatorWriteMessage1,
+  responderReadMessage1,
+  responderWriteMessage2,
+  initiatorReadMessage2,
+} from '../src/crypto/handshake';
+import { createDataEnvelope, openDataEnvelope } from '../src/envelope/envelope';
+import { RelayNode, computeDestinationHint, createRoutingAdvertisement } from '../src/routing/routing';
+import { createIdentity } from '../src/identity/identity';
+import { wrapWithSenderIdentity, unwrapSenderIdentity } from '../src/identity/seal';
+import { encodeTextMessage, decodeTextMessage } from '../src/message/message';
+import { createBluetoothTransport, type SimulatedTransport } from '../src/transport/transport';
+
+function connectNodes(a: RelayNode, b: RelayNode): void {
+  (a.transport as SimulatedTransport).connectPeer(b.transport as SimulatedTransport);
+}
+
+const text = (s: string) => new TextEncoder().encode(s);
+const decode = (b: Uint8Array) => new TextDecoder().decode(b);
+
+describe('Delivery acknowledgment (RFC-0007 Section 7)', () => {
+  it('sends and receives a basic ack directly', () => {
+    const alice = new RelayNode('alice', createIdentity(), createBluetoothTransport('alice'));
+    const bob = new RelayNode('bob', createIdentity(), createBluetoothTransport('bob'));
+    connectNodes(alice, bob);
+
+    const aliceHint = computeDestinationHint(alice.identity.publicKey);
+    const aliceAd = createRoutingAdvertisement(alice.identity, [aliceHint]);
+    bob.receiveAdvertisement('alice', aliceAd);
+
+    let received: Uint8Array | null = null;
+    alice.onAckReceived((messageId) => {
+      received = messageId;
+    });
+
+    const fakeMessageId = new Uint8Array(16).fill(9);
+    bob.sendAck(aliceHint, fakeMessageId);
+
+    expect(received).toEqual(fakeMessageId);
+  });
+
+  it('the real flow: Bob decrypts a sealed-sender message, learns it is from Alice using only the sealed field, and sends her a delivery confirmation', () => {
+    const aliceStatic = generateX25519KeyPair();
+    const bobStatic = generateX25519KeyPair();
+    const aliceIdentity = createIdentity();
+    const bobIdentity = createIdentity();
+
+    const { message: msg1, state: aliceHandshakeState, initiatorEphemeral } =
+      initiatorWriteMessage1(aliceStatic, bobStatic.publicKey);
+    const { state: bobHandshakeState, initiatorStaticPublicKey } =
+      responderReadMessage1(bobStatic, msg1);
+    const { message: msg2, result: bobHandshakeResult, initialRatchetKeyPair } =
+      responderWriteMessage2(bobHandshakeState, msg1.ephemeralPublicKey, initiatorStaticPublicKey);
+    const aliceHandshakeResult = initiatorReadMessage2(aliceHandshakeState, aliceStatic, initiatorEphemeral, msg2);
+
+    const aliceRatchet = DoubleRatchet.initAsInitiator(aliceHandshakeResult.rootKey, msg2.ephemeralPublicKey);
+    const bobRatchet = DoubleRatchet.initAsResponder(bobHandshakeResult.rootKey, initialRatchetKeyPair);
+
+    const aliceNode = new RelayNode('alice', aliceIdentity, createBluetoothTransport('alice'));
+    const bobNode = new RelayNode('bob', bobIdentity, createBluetoothTransport('bob'));
+    connectNodes(aliceNode, bobNode);
+
+    const bobHint = computeDestinationHint(bobIdentity.publicKey);
+    const aliceHint = computeDestinationHint(aliceIdentity.publicKey);
+    const bobAd = createRoutingAdvertisement(bobIdentity, [bobHint]);
+    const aliceAd = createRoutingAdvertisement(aliceIdentity, [aliceHint]);
+    aliceNode.receiveAdvertisement('bob', bobAd);
+    bobNode.receiveAdvertisement('alice', aliceAd);
+
+    let aliceConfirmedMessageId: Uint8Array | null = null;
+    aliceNode.onAckReceived((messageId) => {
+      aliceConfirmedMessageId = messageId;
+    });
+
+    bobNode.onDelivered((envelope) => {
+      const { ratchetHeader, ciphertext } = openDataEnvelope(envelope);
+      const plaintext = bobRatchet.decrypt(ratchetHeader, ciphertext);
+      const { senderPublicKey, payload } = unwrapSenderIdentity(plaintext);
+      expect(decodeTextMessage(payload)).toBe('hi bob');
+
+      const senderHint = computeDestinationHint(senderPublicKey);
+      bobNode.sendAck(senderHint, envelope.header.messageId);
+    });
+
+    const plaintext = wrapWithSenderIdentity(aliceIdentity.publicKey, encodeTextMessage('hi bob'));
+    const { header, ciphertext } = aliceRatchet.encrypt(plaintext);
+    const envelope = createDataEnvelope(bobHint, header, ciphertext, 10);
+
+    aliceNode.receiveEnvelope(envelope, null);
+
+    expect(aliceConfirmedMessageId).toEqual(envelope.header.messageId);
+  });
+
+  it('an ack for an unreachable destination queues just like any other message, no special-cased failure', () => {
+    const relay = new RelayNode('relay', createIdentity(), createBluetoothTransport('relay'));
+
+    const unknownHint = new Uint8Array(8).fill(7);
+    relay.sendAck(unknownHint, new Uint8Array(16).fill(1));
+
+    expect(relay.queueSize()).toBe(1);
+  });
+});
