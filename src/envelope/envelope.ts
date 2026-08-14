@@ -60,25 +60,46 @@ function coarseTimestamp(): number {
 }
 
 /** Positional tuple form of RoutingHeader, no field names on the wire. */
-type EncodedHeaderTuple = [number, number, Uint8Array, number, Uint8Array, number];
+type EncodedHeaderTuple = [
+  number,
+  number,
+  Uint8Array,
+  number,
+  Uint8Array,
+  number
+];
+
 /** Positional tuple form of the full envelope. */
 type EncodedEnvelopeTuple = [EncodedHeaderTuple, Uint8Array];
+
 /** Positional tuple form of a ratchet header plus ciphertext. */
-type EncodedSealedPayloadTuple = [Uint8Array, number, number, Uint8Array];
+type EncodedSealedPayloadTuple = [
+  Uint8Array,
+  number,
+  number,
+  Uint8Array
+];
 
 function headerToTuple(header: RoutingHeader): EncodedHeaderTuple {
-  return [header.version, header.packetType, header.messageId, header.ttl, header.destinationHint, header.timestamp];
+  return [
+    header.version,
+    header.packetType,
+    header.messageId,
+    header.ttl,
+    header.destinationHint,
+    header.timestamp,
+  ];
 }
 
 function tupleToHeader(tuple: EncodedHeaderTuple): RoutingHeader {
-  return {
-    version: tuple[0],
-    packetType: tuple[1],
-    messageId: Uint8Array.from(tuple[2]),
-    ttl: tuple[3],
-    destinationHint: Uint8Array.from(tuple[4]),
-    timestamp: tuple[5],
-  };
+  return {
+    version: tuple[0],
+    packetType: tuple[1],
+    messageId: Uint8Array.from(tuple[2]),
+    ttl: tuple[3],
+    destinationHint: Uint8Array.from(tuple[4]),
+    timestamp: tuple[5],
+  };
 }
 
 /**
@@ -108,6 +129,7 @@ export function createDataEnvelope(
     ratchetHeader.messageNumber,
     ciphertext,
   ];
+
   const sealedPayload = Uint8Array.from(cbor.encode(sealedTuple));
 
   return { header, sealedPayload };
@@ -120,8 +142,14 @@ export function createDataEnvelope(
  */
 export function openDataEnvelope(
   envelope: Envelope
-): { ratchetHeader: RatchetHeader; ciphertext: Uint8Array } {
-  const tuple = cbor.decode(envelope.sealedPayload) as EncodedSealedPayloadTuple;
+): {
+  ratchetHeader: RatchetHeader;
+  ciphertext: Uint8Array;
+} {
+  const tuple = cbor.decode(
+    envelope.sealedPayload
+  ) as EncodedSealedPayloadTuple;
+
   return {
     ratchetHeader: {
       dhPublicKey: tuple[0],
@@ -134,64 +162,50 @@ export function openDataEnvelope(
 
 /** Serializes a full envelope for actual transmission over a transport. */
 export function encodeEnvelope(envelope: Envelope): Uint8Array {
-  const tuple: EncodedEnvelopeTuple = [headerToTuple(envelope.header), envelope.sealedPayload];
+  const tuple: EncodedEnvelopeTuple = [
+    headerToTuple(envelope.header),
+    envelope.sealedPayload,
+  ];
+
   return Uint8Array.from(cbor.encode(tuple));
 }
 
 /** The transport-receiving mirror of encodeEnvelope. */
 export function decodeEnvelope(bytes: Uint8Array): Envelope {
-  const tuple = cbor.decode(bytes) as EncodedEnvelopeTuple;
-  return { header: tupleToHeader(tuple[0]), sealedPayload: Uint8Array.from(tuple[1]) };
+  const tuple = cbor.decode(bytes) as EncodedEnvelopeTuple;
+
+  return {
+    header: tupleToHeader(tuple[0]),
+    sealedPayload: Uint8Array.from(tuple[1]),
+  };
 }
 
 /**
- * Wraps a pre-encoded sync sub-message (summary, request, or
- * transfer, RFC-0009 Section 6) as a StoreForwardSync packet. Sync
- * is always point-to-point between directly connected transport
- * neighbors, never routed multi-hop, so destinationHint is unused
- * here, a future relay-to-relay sync across the mesh would need real
- * addressing, deferred rather than half-built now.
- */
-export function createSyncEnvelope(payload: Uint8Array, ttl: number = DEFAULT_TTL): Envelope {
-  const header: RoutingHeader = {
-    version: PROTOCOL_VERSION,
-    packetType: PacketType.StoreForwardSync,
-    messageId: randomBytes(16),
-    ttl,
-    destinationHint: new Uint8Array(8),
-    timestamp: coarseTimestamp(),
-  };
-  return { header, sealedPayload: payload };
-}
-
-
-
-
-/**
- * RFC-0006 Section 4, RFC-0007 Section 7: acknowledges receipt of a
- * specific message id, addressed back to whoever should learn their
- * message arrived. Uses the exact same point-to-point routing as any
- * Data packet, no special casing needed at the transport or routing
- * layer.
- */
-export function createAckEnvelope(
-  destinationHint: Uint8Array,
-  acknowledgedMessageId: Uint8Array,
-  ttl: number = DEFAULT_TTL
+ * Wraps a pre-encoded sync sub-message (summary, request, or
+ * transfer, RFC-0009 Section 6) as a StoreForwardSync packet. Sync
+ * is always point-to-point between directly connected transport
+ * neighbors, never routed multi-hop, so destinationHint is unused
+ * here. A future relay-to-relay sync across the mesh would need real
+ * addressing, deferred rather than half-built now.
+ */
+export function createSyncEnvelope(
+  payload: Uint8Array,
+  ttl: number = DEFAULT_TTL
 ): Envelope {
-  const header: RoutingHeader = {
-    version: PROTOCOL_VERSION,
-    packetType: PacketType.Ack,
-    messageId: randomBytes(16),
-    ttl,
-    destinationHint,
-    timestamp: coarseTimestamp(),
-  };
-  return { header, sealedPayload: acknowledgedMessageId };
+  const header: RoutingHeader = {
+    version: PROTOCOL_VERSION,
+    packetType: PacketType.StoreForwardSync,
+    messageId: randomBytes(16),
+    ttl,
+    destinationHint: new Uint8Array(8),
+    timestamp: coarseTimestamp(),
+  };
+
+  return {
+    header,
+    sealedPayload: payload,
+  };
 }
-
-
-
 
 /**
  * RFC-0006 Section 4, RFC-0007 Section 7: acknowledges receipt of a
@@ -213,16 +227,23 @@ export function createAckEnvelope(
     destinationHint,
     timestamp: coarseTimestamp(),
   };
-  return { header, sealedPayload: acknowledgedMessageId };
+
+  return {
+    header,
+    sealedPayload: acknowledgedMessageId,
+  };
 }
 
 /**
- * Wraps a signed broadcast payload (RFC-0006 Section 4, RFC-0001's
+ * Wraps a signed broadcast payload (RFC-0006 Section 4, RFC-0001's
  * emergency broadcast goal). No single destination, everyone is a
  * recipient, so destinationHint is unused here, same convention as
  * sync packets.
  */
-export function createBroadcastEnvelope(payload: Uint8Array, ttl: number = DEFAULT_TTL): Envelope {
+export function createBroadcastEnvelope(
+  payload: Uint8Array,
+  ttl: number = DEFAULT_TTL
+): Envelope {
   const header: RoutingHeader = {
     version: PROTOCOL_VERSION,
     packetType: PacketType.EmergencyBroadcast,
@@ -231,7 +252,11 @@ export function createBroadcastEnvelope(payload: Uint8Array, ttl: number = DEFAU
     destinationHint: new Uint8Array(8),
     timestamp: coarseTimestamp(),
   };
-  return { header, sealedPayload: payload };
+
+  return {
+    header,
+    sealedPayload: payload,
+  };
 }
 
 /**
@@ -241,13 +266,21 @@ export function createBroadcastEnvelope(payload: Uint8Array, ttl: number = DEFAU
  * is an expected, routine event, not a bug in your own code, per the
  * fail-closed principle in RFC-0001 Section 5.
  */
-export function validateRoutingHeader(header: RoutingHeader, maxAgeSeconds: number = 3600): boolean {
+export function validateRoutingHeader(
+  header: RoutingHeader,
+  maxAgeSeconds: number = 3600
+): boolean {
   if (header.version !== PROTOCOL_VERSION) return false;
   if (header.ttl <= 0) return false;
 
   const now = Math.floor(Date.now() / 1000);
-  if (header.timestamp > now + TIMESTAMP_GRANULARITY_SECONDS) return false;
-  if (now - header.timestamp > maxAgeSeconds) return false;
+
+  if (header.timestamp > now + TIMESTAMP_GRANULARITY_SECONDS) {
+    return false;
+  }
+
+  if (now - header.timestamp > maxAgeSeconds) {
+    return false;
+  }
 
   return true;
-}
