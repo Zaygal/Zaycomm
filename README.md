@@ -988,3 +988,17 @@ Explicitly deferred rather than resolved here, to be addressed by future RFCs bu
 ---
 
 End of RFC 0010. This concludes the initial Zaycomm RFC series, RFC 0001 through RFC 0010. Future work proceeds either through amendments to these documents via superseding RFCs, or through new RFCs numbered RFC 0011 onward, per the documentation standards established in RFC 0001, Section 10.
+## Version
+
+**Current Version: v1.0**
+
+This is the first stable release of the Zaycomm protocol. All core features are implemented and tested.
+
+- 104 tests passing
+- 7 phases complete
+- 4 message types supported
+- Full cryptographic stack
+- Multi-hop routing with store and forward
+- Transport agnostic (BLE, Wi-Fi Direct, Internet)
+
+See the [Releases](https://github.com/yourusername/Zaycomm/releases) page for version history.
