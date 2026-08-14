@@ -13,11 +13,6 @@
 // MTU, discovered by the transport layer tests in RFC-0008's phase,
 // not assumed away. Both sides already agree on field order from the
 // code itself, so the names never need to travel on the wire at all.
-//
-// Scoping note: full sender-sealing (RFC-0004 Section 4) needs actual
-// identity keys, which is identity.ts, RFC-0005, built but not yet
-// wired into this layer. For now the sealed payload carries the
-// ratchet's own ephemeral key as an implicit reference.
 
 import { Encoder } from 'cbor-x';
 import { randomBytes } from '@noble/hashes/utils.js';
@@ -60,35 +55,14 @@ function coarseTimestamp(): number {
 }
 
 /** Positional tuple form of RoutingHeader, no field names on the wire. */
-type EncodedHeaderTuple = [
-  number,
-  number,
-  Uint8Array,
-  number,
-  Uint8Array,
-  number
-];
-
+type EncodedHeaderTuple = [number, number, Uint8Array, number, Uint8Array, number];
 /** Positional tuple form of the full envelope. */
 type EncodedEnvelopeTuple = [EncodedHeaderTuple, Uint8Array];
-
 /** Positional tuple form of a ratchet header plus ciphertext. */
-type EncodedSealedPayloadTuple = [
-  Uint8Array,
-  number,
-  number,
-  Uint8Array
-];
+type EncodedSealedPayloadTuple = [Uint8Array, number, number, Uint8Array];
 
 function headerToTuple(header: RoutingHeader): EncodedHeaderTuple {
-  return [
-    header.version,
-    header.packetType,
-    header.messageId,
-    header.ttl,
-    header.destinationHint,
-    header.timestamp,
-  ];
+  return [header.version, header.packetType, header.messageId, header.ttl, header.destinationHint, header.timestamp];
 }
 
 function tupleToHeader(tuple: EncodedHeaderTuple): RoutingHeader {
@@ -129,7 +103,6 @@ export function createDataEnvelope(
     ratchetHeader.messageNumber,
     ciphertext,
   ];
-
   const sealedPayload = Uint8Array.from(cbor.encode(sealedTuple));
 
   return { header, sealedPayload };
@@ -142,42 +115,28 @@ export function createDataEnvelope(
  */
 export function openDataEnvelope(
   envelope: Envelope
-): {
-  ratchetHeader: RatchetHeader;
-  ciphertext: Uint8Array;
-} {
-  const tuple = cbor.decode(
-    envelope.sealedPayload
-  ) as EncodedSealedPayloadTuple;
-
+): { ratchetHeader: RatchetHeader; ciphertext: Uint8Array } {
+  const tuple = cbor.decode(envelope.sealedPayload) as EncodedSealedPayloadTuple;
   return {
     ratchetHeader: {
-      dhPublicKey: tuple[0],
+      dhPublicKey: Uint8Array.from(tuple[0]),
       previousChainLength: tuple[1],
       messageNumber: tuple[2],
     },
-    ciphertext: tuple[3],
+    ciphertext: Uint8Array.from(tuple[3]),
   };
 }
 
 /** Serializes a full envelope for actual transmission over a transport. */
 export function encodeEnvelope(envelope: Envelope): Uint8Array {
-  const tuple: EncodedEnvelopeTuple = [
-    headerToTuple(envelope.header),
-    envelope.sealedPayload,
-  ];
-
+  const tuple: EncodedEnvelopeTuple = [headerToTuple(envelope.header), envelope.sealedPayload];
   return Uint8Array.from(cbor.encode(tuple));
 }
 
 /** The transport-receiving mirror of encodeEnvelope. */
 export function decodeEnvelope(bytes: Uint8Array): Envelope {
   const tuple = cbor.decode(bytes) as EncodedEnvelopeTuple;
-
-  return {
-    header: tupleToHeader(tuple[0]),
-    sealedPayload: Uint8Array.from(tuple[1]),
-  };
+  return { header: tupleToHeader(tuple[0]), sealedPayload: Uint8Array.from(tuple[1]) };
 }
 
 /**
@@ -185,13 +144,10 @@ export function decodeEnvelope(bytes: Uint8Array): Envelope {
  * transfer, RFC-0009 Section 6) as a StoreForwardSync packet. Sync
  * is always point-to-point between directly connected transport
  * neighbors, never routed multi-hop, so destinationHint is unused
- * here. A future relay-to-relay sync across the mesh would need real
+ * here, a future relay-to-relay sync across the mesh would need real
  * addressing, deferred rather than half-built now.
  */
-export function createSyncEnvelope(
-  payload: Uint8Array,
-  ttl: number = DEFAULT_TTL
-): Envelope {
+export function createSyncEnvelope(payload: Uint8Array, ttl: number = DEFAULT_TTL): Envelope {
   const header: RoutingHeader = {
     version: PROTOCOL_VERSION,
     packetType: PacketType.StoreForwardSync,
@@ -200,11 +156,7 @@ export function createSyncEnvelope(
     destinationHint: new Uint8Array(8),
     timestamp: coarseTimestamp(),
   };
-
-  return {
-    header,
-    sealedPayload: payload,
-  };
+  return { header, sealedPayload: payload };
 }
 
 /**
@@ -227,11 +179,7 @@ export function createAckEnvelope(
     destinationHint,
     timestamp: coarseTimestamp(),
   };
-
-  return {
-    header,
-    sealedPayload: acknowledgedMessageId,
-  };
+  return { header, sealedPayload: acknowledgedMessageId };
 }
 
 /**
@@ -240,10 +188,7 @@ export function createAckEnvelope(
  * recipient, so destinationHint is unused here, same convention as
  * sync packets.
  */
-export function createBroadcastEnvelope(
-  payload: Uint8Array,
-  ttl: number = DEFAULT_TTL
-): Envelope {
+export function createBroadcastEnvelope(payload: Uint8Array, ttl: number = DEFAULT_TTL): Envelope {
   const header: RoutingHeader = {
     version: PROTOCOL_VERSION,
     packetType: PacketType.EmergencyBroadcast,
@@ -252,11 +197,7 @@ export function createBroadcastEnvelope(
     destinationHint: new Uint8Array(8),
     timestamp: coarseTimestamp(),
   };
-
-  return {
-    header,
-    sealedPayload: payload,
-  };
+  return { header, sealedPayload: payload };
 }
 
 /**
@@ -266,21 +207,13 @@ export function createBroadcastEnvelope(
  * is an expected, routine event, not a bug in your own code, per the
  * fail-closed principle in RFC-0001 Section 5.
  */
-export function validateRoutingHeader(
-  header: RoutingHeader,
-  maxAgeSeconds: number = 3600
-): boolean {
+export function validateRoutingHeader(header: RoutingHeader, maxAgeSeconds: number = 3600): boolean {
   if (header.version !== PROTOCOL_VERSION) return false;
   if (header.ttl <= 0) return false;
 
   const now = Math.floor(Date.now() / 1000);
-
-  if (header.timestamp > now + TIMESTAMP_GRANULARITY_SECONDS) {
-    return false;
-  }
-
-  if (now - header.timestamp > maxAgeSeconds) {
-    return false;
-  }
+  if (header.timestamp > now + TIMESTAMP_GRANULARITY_SECONDS) return false;
+  if (now - header.timestamp > maxAgeSeconds) return false;
 
   return true;
+}
