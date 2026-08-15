@@ -98,6 +98,12 @@ describe('Fragmentation wired into the transport send path (RFC-0006 Section 5)'
     const b = new RelayNode('b', createIdentity(), createBluetoothTransport('b'));
     connectNodes(a, b);
 
+    // C8: store-forward synchronization is only available after the
+    // C3 authenticated session has been established. This test models
+    // that post-handshake state explicitly rather than bypassing it.
+    a.registerAuthenticatedPeer('b', b.identity.publicKey);
+    b.registerAuthenticatedPeer('a', a.identity.publicKey);
+
     const destinationHint = new Uint8Array(8).fill(3);
     for (let i = 0; i < 5; i++) {
       const envelope = createDataEnvelope(
