@@ -263,9 +263,15 @@ export class RelayNode {
       header: { ...envelope.header, ttl: envelope.header.ttl - 1 },
       sealedPayload: envelope.sealedPayload,
     };
-    const sent = this.sendEnvelopeOverTransport(nextHopId, forwardedEnvelope);
-    if (sent && envelope.header.packetType === PacketType.Data) {
+
+    const expectsAck = envelope.header.packetType === PacketType.Data;
+    if (expectsAck) {
       this.recordPendingAck(envelope.header.messageId, nextHopId, envelope.header.destinationHint);
+    }
+
+    const sent = this.sendEnvelopeOverTransport(nextHopId, forwardedEnvelope);
+    if (!sent && expectsAck) {
+      this.pendingAcks.delete(bytesToHex(envelope.header.messageId));
     }
     return sent;
   }
