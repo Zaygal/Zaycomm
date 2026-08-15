@@ -9,7 +9,11 @@ import {
   responderWriteMessage2,
   initiatorReadMessage2,
 } from '../src/crypto/handshake';
-import { createDataEnvelope, openDataEnvelope } from '../src/envelope/envelope';
+import {
+  createDataEnvelope,
+  openDataEnvelope,
+  createAckEnvelope,
+} from '../src/envelope/envelope';
 import { RelayNode, computeDestinationHint, createRoutingAdvertisement } from '../src/routing/routing';
 import { createIdentity } from '../src/identity/identity';
 import { wrapWithSenderIdentity, unwrapSenderIdentity } from '../src/identity/seal';
@@ -24,24 +28,64 @@ const text = (s: string) => new TextEncoder().encode(s);
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
 
 describe('Delivery acknowledgment (RFC-0007 Section 7)', () => {
-  it('sends and receives a basic ack directly', () => {
+  it('accepts an authenticated ack from the actual message destination', () => {
     const alice = new RelayNode('alice', createIdentity(), createBluetoothTransport('alice'));
     const bob = new RelayNode('bob', createIdentity(), createBluetoothTransport('bob'));
     connectNodes(alice, bob);
 
     const aliceHint = computeDestinationHint(alice.identity.publicKey);
-    const aliceAd = createRoutingAdvertisement(alice.identity, [aliceHint]);
-    bob.receiveAdvertisement('alice', aliceAd);
+    const bobHint = computeDestinationHint(bob.identity.publicKey);
+    alice.receiveAdvertisement('bob', createRoutingAdvertisement(bob.identity, [bobHint]));
+    bob.receiveAdvertisement('alice', createRoutingAdvertisement(alice.identity, [aliceHint]));
 
-    let received: Uint8Array | null = null;
-    alice.onAckReceived((messageId) => {
-      received = messageId;
-    });
+    const fakeDataEnvelope = {
+      header: {
+        version: 1,
+        packetType: 1,
+        messageId: new Uint8Array(16).fill(9),
+        ttl: 10,
+        destinationHint: bobHint,
+        timestamp: Math.floor(Date.now() / 60_000) * 60,
+      },
+      sealedPayload: new Uint8Array([1, 2, 3]),
+    } as const;
 
-    const fakeMessageId = new Uint8Array(16).fill(9);
-    bob.sendAck(aliceHint, fakeMessageId);
+    alice.receiveEnvelope(fakeDataEnvelope, null);
+    bob.sendAck(aliceHint, fakeDataEnvelope.header.messageId);
 
-    expect(received).toEqual(fakeMessageId);
+    expect(alice.neighborTrustScore('bob')).toBe(1);
+  });
+
+  it('rejects a validly signed ack from the wrong identity and does not increase trust', () => {
+    const alice = new RelayNode('alice', createIdentity(), createBluetoothTransport('alice'));
+    const bob = new RelayNode('bob', createIdentity(), createBluetoothTransport('bob'));
+    const attacker = createIdentity();
+    connectNodes(alice, bob);
+
+    const aliceHint = computeDestinationHint(alice.identity.publicKey);
+    const bobHint = computeDestinationHint(bob.identity.publicKey);
+    alice.receiveAdvertisement('bob', createRoutingAdvertisement(bob.identity, [bobHint]));
+    bob.receiveAdvertisement('alice', createRoutingAdvertisement(alice.identity, [aliceHint]));
+
+    const messageId = new Uint8Array(16).fill(7);
+    const fakeDataEnvelope = {
+      header: {
+        version: 1,
+        packetType: 1,
+        messageId,
+        ttl: 10,
+        destinationHint: bobHint,
+        timestamp: Math.floor(Date.now() / 60_000) * 60,
+      },
+      sealedPayload: new Uint8Array([1, 2, 3]),
+    } as const;
+    alice.receiveEnvelope(fakeDataEnvelope, null);
+
+    const forgedAck = createAckEnvelope(aliceHint, messageId, attacker);
+    const result = alice.receiveEnvelope(forgedAck, 'bob');
+
+    expect(result.outcome).toBe('dropped');
+    expect(alice.neighborTrustScore('bob')).toBe(0);
   });
 
   it('the real flow: Bob decrypts a sealed-sender message, learns it is from Alice using only the sealed field, and sends her a delivery confirmation', () => {
