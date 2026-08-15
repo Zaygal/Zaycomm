@@ -35,6 +35,10 @@ const ROUTING_AD_CONTEXT = 'ZAYCOMM_ROUTING_AD_V1';
 const DESTINATION_HINT_LENGTH = 8;
 const DEFAULT_BROADCAST_TTL = 8;
 const MAX_PENDING_ACKS = 500;
+const MAX_ROUTING_AD_AGE_MS = 5 * 60 * 1000;
+const MAX_ROUTING_AD_FUTURE_SKEW_MS = 30 * 1000;
+const MAX_ROUTING_AD_DESTINATIONS = 256;
+const MAX_SEEN_ROUTING_ADS = 2048;
 
 const FRAME_KIND_ENVELOPE = 0;
 const FRAME_KIND_FRAGMENT = 1;
@@ -65,7 +69,16 @@ export function createRoutingAdvertisement(
   return { advertiserPublicKey: identity.publicKey, reachableDestinations, timestamp, signature };
 }
 
-export function verifyRoutingAdvertisement(ad: RoutingAdvertisement): boolean {
+export function verifyRoutingAdvertisement(ad: RoutingAdvertisement, nowMs: number = Date.now()): boolean {
+  if (!Number.isSafeInteger(ad.timestamp) || ad.timestamp < 0) return false;
+  if (!Array.isArray(ad.reachableDestinations) || ad.reachableDestinations.length > MAX_ROUTING_AD_DESTINATIONS) return false;
+  if (ad.advertiserPublicKey.length !== 32 || ad.signature.length !== 64) return false;
+  if (ad.reachableDestinations.some((hint) => hint.length !== DESTINATION_HINT_LENGTH)) return false;
+
+  const timestampMs = ad.timestamp * 1000;
+  if (timestampMs < nowMs - MAX_ROUTING_AD_AGE_MS) return false;
+  if (timestampMs > nowMs + MAX_ROUTING_AD_FUTURE_SKEW_MS) return false;
+
   const message = buildAdvertisementMessage(ad.reachableDestinations, ad.timestamp);
   return verifySignature(ad.signature, message, ad.advertiserPublicKey);
 }
@@ -131,6 +144,7 @@ export class RelayNode {
   private broadcastListeners: ((message: BroadcastMessage) => void)[] = [];
   private ackListeners: ((acknowledgedMessageId: Uint8Array) => void)[] = [];
   private seenBroadcasts = new Map<string, number>();
+  private seenRoutingAdvertisements = new Map<string, number>();
   private neighborTrust = new Map<string, number>();
   private pendingAcks = new Map<string, PendingAck>();
 
@@ -140,8 +154,6 @@ export class RelayNode {
     this.transport = transport;
     this.ownDestinationHint = computeDestinationHint(identity.publicKey);
     this.transport.onReceive((fromNeighborId, frame) => {
-      // The transport boundary is hostile input. No decoder, parser, or
-      // application callback is allowed to terminate the node on malformed data.
       try {
         if (frame.length === 0) return;
         const kind = frame[0];
@@ -157,8 +169,6 @@ export class RelayNode {
         const envelope = decodeEnvelope(body);
         this.receiveEnvelope(envelope, fromNeighborId);
       } catch {
-        // Malformed/untrusted wire input is dropped. Never propagate a
-        // decoder exception through the transport event loop.
         return;
       }
     });
@@ -194,6 +204,18 @@ export class RelayNode {
     for (const [key, seenAt] of this.seenBroadcasts) {
       if (now - seenAt > maxAgeMs) {
         this.seenBroadcasts.delete(key);
+        purged++;
+      }
+    }
+    return purged;
+  }
+
+  purgeStaleRoutingAdvertisements(maxAgeMs: number = MAX_ROUTING_AD_AGE_MS): number {
+    const now = Date.now();
+    let purged = 0;
+    for (const [key, seenAt] of this.seenRoutingAdvertisements) {
+      if (now - seenAt > maxAgeMs) {
+        this.seenRoutingAdvertisements.delete(key);
         purged++;
       }
     }
@@ -254,6 +276,23 @@ export class RelayNode {
   }
 
   receiveAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): void {
+    if (!verifyRoutingAdvertisement(ad)) return;
+
+    const fingerprint = bytesToHex(sha256(concatBytes(
+      ad.advertiserPublicKey,
+      u64le(ad.timestamp),
+      ...ad.reachableDestinations,
+      ad.signature
+    )));
+    const replayKey = `${fromNeighborId}:${fingerprint}`;
+    if (this.seenRoutingAdvertisements.has(replayKey)) return;
+
+    if (this.seenRoutingAdvertisements.size >= MAX_SEEN_ROUTING_ADS) {
+      const oldestKey = this.seenRoutingAdvertisements.keys().next().value;
+      if (oldestKey !== undefined) this.seenRoutingAdvertisements.delete(oldestKey);
+    }
+    this.seenRoutingAdvertisements.set(replayKey, Date.now());
+
     this.routingTable.learnFromAdvertisement(fromNeighborId, ad);
     for (const hint of ad.reachableDestinations) this.attemptQueuedDelivery(hint);
   }
