@@ -1,6 +1,7 @@
 // test/fragment.test.ts
 
 import { describe, it, expect } from 'vitest';
+import { Encoder } from 'cbor-x';
 import { generateX25519KeyPair } from '../src/crypto/keys';
 import { DoubleRatchet } from '../src/crypto/ratchet';
 import {
@@ -10,9 +11,17 @@ import {
   initiatorReadMessage2,
 } from '../src/crypto/handshake';
 import { createDataEnvelope, encodeEnvelope, openDataEnvelope } from '../src/envelope/envelope';
-import { fragmentEnvelope, FragmentReassembler } from '../src/envelope/fragment';
+import {
+  fragmentEnvelope,
+  FragmentReassembler,
+  MAX_FRAGMENT_COUNT,
+  MAX_FRAGMENT_SIZE,
+  MAX_PENDING_FRAGMENT_SETS,
+  MAX_PENDING_FRAGMENT_BYTES,
+} from '../src/envelope/fragment';
 import { createBluetoothTransport } from '../src/transport/transport';
 
+const cbor = new Encoder();
 const text = (s: string) => new TextEncoder().encode(s);
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
 
@@ -35,6 +44,10 @@ function buildRealEncryptedEnvelope(plaintext: string) {
   const envelope = createDataEnvelope(new Uint8Array(8).fill(1), header, ciphertext, 10);
 
   return { envelope, bobRatchet };
+}
+
+function maliciousFragment(messageId: Uint8Array, fragmentIndex: number, fragmentCount: number, data: Uint8Array) {
+  return Uint8Array.from(cbor.encode([messageId, fragmentIndex, fragmentCount, data]));
 }
 
 describe('Fragmentation (RFC-0006 Section 5)', () => {
@@ -158,5 +171,86 @@ describe('Fragmentation (RFC-0006 Section 5)', () => {
     expect(reassembledEnvelope).not.toBeNull();
     const { ratchetHeader, ciphertext } = openDataEnvelope(reassembledEnvelope!);
     expect(decode(bobRatchet.decrypt(ratchetHeader, ciphertext))).toBe(longMessage);
+  });
+
+  it('rejects a fragment count above the protocol limit without allocating state', () => {
+    const reassembler = new FragmentReassembler();
+    const id = new Uint8Array(16).fill(7);
+    const wire = maliciousFragment(id, 0, MAX_FRAGMENT_COUNT + 1, new Uint8Array([1]));
+
+    expect(reassembler.addFragment(wire)).toBeNull();
+    expect(reassembler.pendingCount()).toBe(0);
+    expect(reassembler.pendingBytesCount()).toBe(0);
+  });
+
+  it('rejects an oversized fragment before it reaches the reassembly store', () => {
+    const reassembler = new FragmentReassembler();
+    const id = new Uint8Array(16).fill(8);
+    const data = new Uint8Array(MAX_FRAGMENT_SIZE + 1);
+    const wire = maliciousFragment(id, 0, 2, data);
+
+    expect(reassembler.addFragment(wire)).toBeNull();
+    expect(reassembler.pendingCount()).toBe(0);
+    expect(reassembler.pendingBytesCount()).toBe(0);
+  });
+
+  it('caps the number of incomplete message sets', () => {
+    const reassembler = new FragmentReassembler();
+
+    for (let i = 0; i < MAX_PENDING_FRAGMENT_SETS; i++) {
+      const id = new Uint8Array(16);
+      id[0] = (i >>> 8) & 0xff;
+      id[1] = i & 0xff;
+      const wire = maliciousFragment(id, 0, 2, new Uint8Array([i & 0xff]));
+      expect(reassembler.addFragment(wire)).toBeNull();
+    }
+
+    expect(reassembler.pendingCount()).toBe(MAX_PENDING_FRAGMENT_SETS);
+
+    const extraId = new Uint8Array(16).fill(0xee);
+    expect(reassembler.addFragment(maliciousFragment(extraId, 0, 2, new Uint8Array([1])))).toBeNull();
+    expect(reassembler.pendingCount()).toBe(MAX_PENDING_FRAGMENT_SETS);
+  });
+
+  it('caps aggregate pending bytes even within one message set', () => {
+    const reassembler = new FragmentReassembler();
+    const id = new Uint8Array(16).fill(9);
+    const chunk = new Uint8Array(MAX_FRAGMENT_SIZE);
+    const fragmentsNeededToExceed = Math.floor(MAX_PENDING_FRAGMENT_BYTES / MAX_FRAGMENT_SIZE) + 1;
+
+    for (let i = 0; i < fragmentsNeededToExceed - 1; i++) {
+      expect(reassembler.addFragment(maliciousFragment(id, i, fragmentsNeededToExceed, chunk))).toBeNull();
+    }
+
+    expect(reassembler.pendingBytesCount()).toBe((fragmentsNeededToExceed - 1) * MAX_FRAGMENT_SIZE);
+    expect(reassembler.addFragment(maliciousFragment(id, fragmentsNeededToExceed - 1, fragmentsNeededToExceed, chunk))).toBeNull();
+    expect(reassembler.pendingBytesCount()).toBeLessThanOrEqual(MAX_PENDING_FRAGMENT_BYTES);
+  });
+
+  it('does not double-count duplicate fragments against resource limits', () => {
+    const reassembler = new FragmentReassembler();
+    const id = new Uint8Array(16).fill(10);
+    const wire = maliciousFragment(id, 0, 2, new Uint8Array([1, 2, 3]));
+
+    expect(reassembler.addFragment(wire)).toBeNull();
+    const bytesAfterFirst = reassembler.pendingBytesCount();
+    expect(reassembler.addFragment(wire)).toBeNull();
+
+    expect(reassembler.pendingCount()).toBe(1);
+    expect(reassembler.pendingBytesCount()).toBe(bytesAfterFirst);
+  });
+
+  it('releases reserved bytes when an incomplete set is purged', async () => {
+    const reassembler = new FragmentReassembler();
+    const id = new Uint8Array(16).fill(11);
+    const wire = maliciousFragment(id, 0, 2, new Uint8Array(100));
+
+    expect(reassembler.addFragment(wire)).toBeNull();
+    expect(reassembler.pendingBytesCount()).toBe(100);
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(reassembler.purgeStale(1)).toBe(1);
+    expect(reassembler.pendingCount()).toBe(0);
+    expect(reassembler.pendingBytesCount()).toBe(0);
   });
 });
