@@ -1,6 +1,5 @@
 // src/routing/routing.ts
-// RFC-0007, Sections 2, 4, 5, 6, and 7, RFC-0009 Section 6, RFC-0006
-// Section 4's emergency broadcast, and RFC-0006 Section 5 fragmentation.
+// RFC-0007 routing, RFC-0009 sync, RFC-0006 fragmentation/broadcast.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { Encoder } from 'cbor-x';
@@ -30,8 +29,8 @@ import {
 } from '../broadcast/broadcast';
 
 const cbor = new Encoder();
-
 const ROUTING_AD_CONTEXT = 'ZAYCOMM_ROUTING_AD_V1';
+const SYNC_AUTH_CONTEXT = new TextEncoder().encode('ZAYCOMM_SYNC_AUTH_V1');
 const DESTINATION_HINT_LENGTH = 8;
 const DEFAULT_BROADCAST_TTL = 8;
 const MAX_PENDING_ACKS = 500;
@@ -39,7 +38,10 @@ const MAX_ROUTING_AD_AGE_MS = 5 * 60 * 1000;
 const MAX_ROUTING_AD_FUTURE_SKEW_MS = 30 * 1000;
 const MAX_ROUTING_AD_DESTINATIONS = 256;
 const MAX_SEEN_ROUTING_ADS = 2048;
-
+const MAX_SYNC_ENTRIES = 512;
+const MAX_SYNC_REQUESTS = 512;
+const MAX_SYNC_TRANSFER_ENVELOPES = 128;
+const MAX_SYNC_TRANSFER_BYTES = 512 * 1024;
 const FRAME_KIND_ENVELOPE = 0;
 const FRAME_KIND_FRAGMENT = 1;
 
@@ -55,17 +57,12 @@ export interface RoutingAdvertisement {
 }
 
 function buildAdvertisementMessage(reachableDestinations: Uint8Array[], timestamp: number): Uint8Array {
-  const context = new TextEncoder().encode(ROUTING_AD_CONTEXT);
-  return concatBytes(context, u64le(timestamp), ...reachableDestinations);
+  return concatBytes(new TextEncoder().encode(ROUTING_AD_CONTEXT), u64le(timestamp), ...reachableDestinations);
 }
 
-export function createRoutingAdvertisement(
-  identity: Identity,
-  reachableDestinations: Uint8Array[]
-): RoutingAdvertisement {
+export function createRoutingAdvertisement(identity: Identity, reachableDestinations: Uint8Array[]): RoutingAdvertisement {
   const timestamp = Math.floor(Date.now() / 1000);
-  const message = buildAdvertisementMessage(reachableDestinations, timestamp);
-  const signature = signMessage(message, identity.privateKey);
+  const signature = signMessage(buildAdvertisementMessage(reachableDestinations, timestamp), identity.privateKey);
   return { advertiserPublicKey: identity.publicKey, reachableDestinations, timestamp, signature };
 }
 
@@ -74,13 +71,9 @@ export function verifyRoutingAdvertisement(ad: RoutingAdvertisement, nowMs: numb
   if (!Array.isArray(ad.reachableDestinations) || ad.reachableDestinations.length > MAX_ROUTING_AD_DESTINATIONS) return false;
   if (ad.advertiserPublicKey.length !== 32 || ad.signature.length !== 64) return false;
   if (ad.reachableDestinations.some((hint) => hint.length !== DESTINATION_HINT_LENGTH)) return false;
-
   const timestampMs = ad.timestamp * 1000;
-  if (timestampMs < nowMs - MAX_ROUTING_AD_AGE_MS) return false;
-  if (timestampMs > nowMs + MAX_ROUTING_AD_FUTURE_SKEW_MS) return false;
-
-  const message = buildAdvertisementMessage(ad.reachableDestinations, ad.timestamp);
-  return verifySignature(ad.signature, message, ad.advertiserPublicKey);
+  if (timestampMs < nowMs - MAX_ROUTING_AD_AGE_MS || timestampMs > nowMs + MAX_ROUTING_AD_FUTURE_SKEW_MS) return false;
+  return verifySignature(ad.signature, buildAdvertisementMessage(ad.reachableDestinations, ad.timestamp), ad.advertiserPublicKey);
 }
 
 class RoutingTable {
@@ -89,12 +82,9 @@ class RoutingTable {
   learnFromAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): void {
     if (!verifyRoutingAdvertisement(ad)) return;
     for (const hint of ad.reachableDestinations) {
-      const hintHex = bytesToHex(hint);
-      let candidates = this.routes.get(hintHex);
-      if (!candidates) {
-        candidates = new Map();
-        this.routes.set(hintHex, candidates);
-      }
+      const key = bytesToHex(hint);
+      let candidates = this.routes.get(key);
+      if (!candidates) { candidates = new Map(); this.routes.set(key, candidates); }
       candidates.set(fromNeighborId, Date.now());
     }
   }
@@ -102,15 +92,11 @@ class RoutingTable {
   lookup(destinationHint: Uint8Array, trustScores: Map<string, number>): string | null {
     const candidates = this.routes.get(bytesToHex(destinationHint));
     if (!candidates || candidates.size === 0) return null;
-
     let best: string | null = null;
     let bestScore = -Infinity;
     for (const neighborId of candidates.keys()) {
       const score = trustScores.get(neighborId) ?? 0;
-      if (score > bestScore) {
-        bestScore = score;
-        best = neighborId;
-      }
+      if (score > bestScore) { bestScore = score; best = neighborId; }
     }
     return best;
   }
@@ -130,7 +116,33 @@ export type DeliveryResult =
 
 type SyncSummaryEntry = [Uint8Array, number];
 type SyncPayloadTuple = [0, SyncSummaryEntry[]] | [1, Uint8Array[]] | [2, Uint8Array[]];
+type AuthenticatedSyncTuple = [Uint8Array, Uint8Array, Uint8Array];
 type PendingAck = { neighborId: string; destinationHint: Uint8Array };
+type AuthenticatedPeer = { identityPublicKey: Uint8Array; establishedAt: number };
+
+function encodeAuthenticatedSync(identity: Identity, inner: SyncPayloadTuple): Uint8Array {
+  const innerBytes = Uint8Array.from(cbor.encode(inner));
+  const message = concatBytes(SYNC_AUTH_CONTEXT, identity.publicKey, innerBytes);
+  const signature = signMessage(message, identity.privateKey);
+  const outer: AuthenticatedSyncTuple = [identity.publicKey, signature, innerBytes];
+  return Uint8Array.from(cbor.encode(outer));
+}
+
+function decodeAuthenticatedSync(payload: Uint8Array): { senderPublicKey: Uint8Array; inner: SyncPayloadTuple } | null {
+  try {
+    const outer = cbor.decode(payload) as AuthenticatedSyncTuple;
+    if (!Array.isArray(outer) || outer.length !== 3) return null;
+    const senderPublicKey = Uint8Array.from(outer[0]);
+    const signature = Uint8Array.from(outer[1]);
+    const innerBytes = Uint8Array.from(outer[2]);
+    if (senderPublicKey.length !== 32 || signature.length !== 64 || innerBytes.length === 0 || innerBytes.length > MAX_SYNC_TRANSFER_BYTES) return null;
+    const message = concatBytes(SYNC_AUTH_CONTEXT, senderPublicKey, innerBytes);
+    if (!verifySignature(signature, message, senderPublicKey)) return null;
+    const inner = cbor.decode(innerBytes) as SyncPayloadTuple;
+    if (!Array.isArray(inner) || inner.length !== 2 || !Number.isInteger(inner[0]) || inner[0] < 0 || inner[0] > 2) return null;
+    return { senderPublicKey, inner };
+  } catch { return null; }
+}
 
 export class RelayNode {
   readonly id: string;
@@ -147,6 +159,7 @@ export class RelayNode {
   private seenRoutingAdvertisements = new Map<string, number>();
   private neighborTrust = new Map<string, number>();
   private pendingAcks = new Map<string, PendingAck>();
+  private authenticatedPeers = new Map<string, AuthenticatedPeer>();
 
   constructor(id: string, identity: Identity, transport: Transport) {
     this.id = id;
@@ -158,89 +171,53 @@ export class RelayNode {
         if (frame.length === 0) return;
         const kind = frame[0];
         const body = frame.slice(1);
-
         if (kind === FRAME_KIND_FRAGMENT) {
           const reassembled = this.reassembler.addFragment(body);
           if (reassembled) this.receiveEnvelope(reassembled, fromNeighborId);
           return;
         }
-
         if (kind !== FRAME_KIND_ENVELOPE) return;
-        const envelope = decodeEnvelope(body);
-        this.receiveEnvelope(envelope, fromNeighborId);
-      } catch {
-        return;
-      }
+        this.receiveEnvelope(decodeEnvelope(body), fromNeighborId);
+      } catch { return; }
     });
   }
 
-  onDelivered(listener: (envelope: Envelope) => void): void {
-    this.deliveryListeners.push(listener);
+  onDelivered(listener: (envelope: Envelope) => void): void { this.deliveryListeners.push(listener); }
+  onBroadcastReceived(listener: (message: BroadcastMessage) => void): void { this.broadcastListeners.push(listener); }
+  onAckReceived(listener: (acknowledgedMessageId: Uint8Array) => void): void { this.ackListeners.push(listener); }
+  hasRoute(destinationHint: Uint8Array): boolean { return this.routingTable.hasRoute(destinationHint); }
+  queueSize(): number { return this.queue.size(); }
+  neighborTrustScore(neighborId: string): number { return this.neighborTrust.get(neighborId) ?? 0; }
+
+  /** Call this only after C3 has established an authenticated session with this neighbor. */
+  registerAuthenticatedPeer(neighborId: string, peerIdentityPublicKey: Uint8Array): void {
+    if (peerIdentityPublicKey.length !== 32) throw new Error('INVALID_PEER_IDENTITY_KEY');
+    this.authenticatedPeers.set(neighborId, { identityPublicKey: Uint8Array.from(peerIdentityPublicKey), establishedAt: Date.now() });
   }
 
-  onBroadcastReceived(listener: (message: BroadcastMessage) => void): void {
-    this.broadcastListeners.push(listener);
-  }
-
-  onAckReceived(listener: (acknowledgedMessageId: Uint8Array) => void): void {
-    this.ackListeners.push(listener);
-  }
-
-  hasRoute(destinationHint: Uint8Array): boolean {
-    return this.routingTable.hasRoute(destinationHint);
-  }
-
-  queueSize(): number {
-    return this.queue.size();
-  }
-
-  neighborTrustScore(neighborId: string): number {
-    return this.neighborTrust.get(neighborId) ?? 0;
-  }
+  unregisterAuthenticatedPeer(neighborId: string): void { this.authenticatedPeers.delete(neighborId); }
+  isAuthenticatedPeer(neighborId: string): boolean { return this.authenticatedPeers.has(neighborId); }
 
   purgeStaleBroadcastRecords(maxAgeMs: number): number {
-    const now = Date.now();
-    let purged = 0;
-    for (const [key, seenAt] of this.seenBroadcasts) {
-      if (now - seenAt > maxAgeMs) {
-        this.seenBroadcasts.delete(key);
-        purged++;
-      }
-    }
+    const now = Date.now(); let purged = 0;
+    for (const [key, seenAt] of this.seenBroadcasts) if (now - seenAt > maxAgeMs) { this.seenBroadcasts.delete(key); purged++; }
     return purged;
   }
 
   purgeStaleRoutingAdvertisements(maxAgeMs: number = MAX_ROUTING_AD_AGE_MS): number {
-    const now = Date.now();
-    let purged = 0;
-    for (const [key, seenAt] of this.seenRoutingAdvertisements) {
-      if (now - seenAt > maxAgeMs) {
-        this.seenRoutingAdvertisements.delete(key);
-        purged++;
-      }
-    }
+    const now = Date.now(); let purged = 0;
+    for (const [key, seenAt] of this.seenRoutingAdvertisements) if (now - seenAt > maxAgeMs) { this.seenRoutingAdvertisements.delete(key); purged++; }
     return purged;
   }
 
-  purgeStaleFragments(maxAgeMs: number): number {
-    return this.reassembler.purgeStale(maxAgeMs);
-  }
+  purgeStaleFragments(maxAgeMs: number): number { return this.reassembler.purgeStale(maxAgeMs); }
 
   sendAck(destinationHint: Uint8Array, acknowledgedMessageId: Uint8Array): void {
     const ackEnvelope = createAckEnvelope(destinationHint, acknowledgedMessageId, this.identity);
-
-    if (bytesEqual(destinationHint, this.ownDestinationHint)) {
-      this.receiveEnvelope(ackEnvelope, null);
-      return;
-    }
-
+    if (bytesEqual(destinationHint, this.ownDestinationHint)) { this.receiveEnvelope(ackEnvelope, null); return; }
     const nextHopId = this.routingTable.lookup(destinationHint, this.neighborTrust);
-    if (nextHopId) {
-      if (this.sendEnvelopeOverTransport(nextHopId, ackEnvelope)) return;
-    }
-
-    const result = this.queue.store(ackEnvelope, 'origin');
-    if (!result.stored) return;
+    if (nextHopId && this.sendEnvelopeOverTransport(nextHopId, ackEnvelope)) return;
+    this.queue.store(ackEnvelope, 'origin');
   }
 
   private recordPendingAck(messageId: Uint8Array, neighborId: string, destinationHint: Uint8Array): void {
@@ -252,47 +229,30 @@ export class RelayNode {
   }
 
   private sendEnvelopeOverTransport(neighborId: string, envelope: Envelope): boolean {
-    const characteristics = this.transport.getLinkCharacteristics(neighborId);
-    const mtu = characteristics?.maxTransmissionUnit ?? Infinity;
+    const mtu = this.transport.getLinkCharacteristics(neighborId)?.maxTransmissionUnit ?? Infinity;
     const encoded = encodeEnvelope(envelope);
-
-    if (encoded.length + 1 <= mtu) {
-      return this.transport.send(neighborId, concatBytes(new Uint8Array([FRAME_KIND_ENVELOPE]), encoded));
-    }
-
+    if (encoded.length + 1 <= mtu) return this.transport.send(neighborId, concatBytes(new Uint8Array([FRAME_KIND_ENVELOPE]), encoded));
     const fragments = fragmentEnvelope(envelope, mtu - 1);
     let allSent = true;
-    for (const fragment of fragments) {
-      const sent = this.transport.send(neighborId, concatBytes(new Uint8Array([FRAME_KIND_FRAGMENT]), fragment));
-      if (!sent) allSent = false;
-    }
+    for (const fragment of fragments) if (!this.transport.send(neighborId, concatBytes(new Uint8Array([FRAME_KIND_FRAGMENT]), fragment))) allSent = false;
     return allSent;
   }
 
   broadcast(content: Uint8Array, ttl: number = DEFAULT_BROADCAST_TTL): void {
-    const message = createBroadcastMessage(this.identity, content);
-    const envelope = createBroadcastEnvelope(encodeBroadcastMessage(message), ttl);
+    const envelope = createBroadcastEnvelope(encodeBroadcastMessage(createBroadcastMessage(this.identity, content)), ttl);
     for (const neighborId of this.transport.discoverNeighbors()) this.sendEnvelopeOverTransport(neighborId, envelope);
   }
 
   receiveAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): void {
     if (!verifyRoutingAdvertisement(ad)) return;
-
-    const fingerprint = bytesToHex(sha256(concatBytes(
-      ad.advertiserPublicKey,
-      u64le(ad.timestamp),
-      ...ad.reachableDestinations,
-      ad.signature
-    )));
+    const fingerprint = bytesToHex(sha256(concatBytes(ad.advertiserPublicKey, u64le(ad.timestamp), ...ad.reachableDestinations, ad.signature)));
     const replayKey = `${fromNeighborId}:${fingerprint}`;
     if (this.seenRoutingAdvertisements.has(replayKey)) return;
-
     if (this.seenRoutingAdvertisements.size >= MAX_SEEN_ROUTING_ADS) {
       const oldestKey = this.seenRoutingAdvertisements.keys().next().value;
       if (oldestKey !== undefined) this.seenRoutingAdvertisements.delete(oldestKey);
     }
     this.seenRoutingAdvertisements.set(replayKey, Date.now());
-
     this.routingTable.learnFromAdvertisement(fromNeighborId, ad);
     for (const hint of ad.reachableDestinations) this.attemptQueuedDelivery(hint);
   }
@@ -307,60 +267,71 @@ export class RelayNode {
   }
 
   private forwardOverTransport(envelope: Envelope, nextHopId: string): boolean {
-    const forwardedEnvelope: Envelope = {
-      header: { ...envelope.header, ttl: envelope.header.ttl - 1 },
-      sealedPayload: envelope.sealedPayload,
-    };
-
+    const forwardedEnvelope: Envelope = { header: { ...envelope.header, ttl: envelope.header.ttl - 1 }, sealedPayload: envelope.sealedPayload };
     const expectsAck = envelope.header.packetType === PacketType.Data;
-    if (expectsAck) {
-      this.recordPendingAck(envelope.header.messageId, nextHopId, envelope.header.destinationHint);
-    }
-
+    if (expectsAck) this.recordPendingAck(envelope.header.messageId, nextHopId, envelope.header.destinationHint);
     const sent = this.sendEnvelopeOverTransport(nextHopId, forwardedEnvelope);
-    if (!sent && expectsAck) {
-      this.pendingAcks.delete(bytesToHex(envelope.header.messageId));
-    }
+    if (!sent && expectsAck) this.pendingAcks.delete(bytesToHex(envelope.header.messageId));
     return sent;
   }
 
-  initiateSync(neighborId: string): void {
-    const entries: SyncSummaryEntry[] = this.queue.getSummary().map((e) => [e.messageId, e.ttlRemaining]);
-    const tuple: SyncPayloadTuple = [0, entries];
-    const summaryEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(tuple)));
-    this.sendEnvelopeOverTransport(neighborId, summaryEnvelope);
+  initiateSync(neighborId: string): boolean {
+    if (!this.authenticatedPeers.has(neighborId)) return false;
+    const entries: SyncSummaryEntry[] = this.queue.getSummary().slice(0, MAX_SYNC_ENTRIES).map((e) => [e.messageId, e.ttlRemaining]);
+    const payload = encodeAuthenticatedSync(this.identity, [0, entries]);
+    return this.sendEnvelopeOverTransport(neighborId, createSyncEnvelope(payload));
+  }
+
+  private peerAuthorized(fromNodeId: string, senderPublicKey: Uint8Array): boolean {
+    const peer = this.authenticatedPeers.get(fromNodeId);
+    return !!peer && bytesEqual(peer.identityPublicKey, senderPublicKey);
   }
 
   private handleSyncPacket(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
-    if (!fromNodeId) return { outcome: 'dropped', reason: 'sync packet with no sender' };
-
-    const tuple = cbor.decode(envelope.sealedPayload) as SyncPayloadTuple;
+    if (!fromNodeId || !this.authenticatedPeers.has(fromNodeId)) return { outcome: 'dropped', reason: 'unauthenticated sync peer' };
+    const authenticated = decodeAuthenticatedSync(envelope.sealedPayload);
+    if (!authenticated || !this.peerAuthorized(fromNodeId, authenticated.senderPublicKey)) return { outcome: 'dropped', reason: 'invalid sync authentication' };
+    const tuple = authenticated.inner;
 
     if (tuple[0] === 0) {
+      if (!Array.isArray(tuple[1]) || tuple[1].length > MAX_SYNC_ENTRIES) return { outcome: 'dropped', reason: 'sync summary too large' };
       const entries: SyncSummaryEntry[] = tuple[1].map(([id, ttl]) => [Uint8Array.from(id), ttl]);
-      const missingIds = entries.filter(([id]) => !this.queue.has(id)).map(([id]) => id);
+      if (entries.some(([id, ttl]) => id.length !== 16 || !Number.isSafeInteger(ttl) || ttl < 0)) return { outcome: 'dropped', reason: 'invalid sync summary' };
+      const missingIds = entries.filter(([id]) => !this.queue.has(id)).map(([id]) => id).slice(0, MAX_SYNC_REQUESTS);
       if (missingIds.length > 0) {
-        const requestTuple: SyncPayloadTuple = [1, missingIds];
-        const requestEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(requestTuple)));
+        const requestEnvelope = createSyncEnvelope(encodeAuthenticatedSync(this.identity, [1, missingIds]));
         this.sendEnvelopeOverTransport(fromNodeId, requestEnvelope);
       }
       return { outcome: 'delivered', envelope };
     }
 
     if (tuple[0] === 1) {
+      if (!Array.isArray(tuple[1]) || tuple[1].length > MAX_SYNC_REQUESTS) return { outcome: 'dropped', reason: 'sync request too large' };
       const requestedIds = tuple[1].map((id) => Uint8Array.from(id));
-      const requested = this.queue.getByIds(requestedIds);
-      const wireEnvelopes = requested.map((e) => Uint8Array.from(encodeEnvelope(e)));
-      const transferTuple: SyncPayloadTuple = [2, wireEnvelopes];
-      const transferEnvelope = createSyncEnvelope(Uint8Array.from(cbor.encode(transferTuple)));
+      if (requestedIds.some((id) => id.length !== 16)) return { outcome: 'dropped', reason: 'invalid sync request' };
+      const requested = this.queue.getByIds(requestedIds).slice(0, MAX_SYNC_TRANSFER_ENVELOPES);
+      const wireEnvelopes: Uint8Array[] = [];
+      let totalBytes = 0;
+      for (const item of requested) {
+        const wire = Uint8Array.from(encodeEnvelope(item));
+        if (totalBytes + wire.length > MAX_SYNC_TRANSFER_BYTES) break;
+        wireEnvelopes.push(wire); totalBytes += wire.length;
+      }
+      const transferEnvelope = createSyncEnvelope(encodeAuthenticatedSync(this.identity, [2, wireEnvelopes]));
       this.sendEnvelopeOverTransport(fromNodeId, transferEnvelope);
       return { outcome: 'delivered', envelope };
     }
 
-    for (const wireBytes of tuple[1]) {
-      const syncedEnvelope = decodeEnvelope(Uint8Array.from(wireBytes));
-      this.receiveEnvelope(syncedEnvelope, fromNodeId);
-    }
+    if (!Array.isArray(tuple[1]) || tuple[1].length > MAX_SYNC_TRANSFER_ENVELOPES) return { outcome: 'dropped', reason: 'sync transfer too large' };
+    let totalBytes = 0;
+    try {
+      for (const wireBytes of tuple[1]) {
+        const wire = Uint8Array.from(wireBytes);
+        totalBytes += wire.length;
+        if (totalBytes > MAX_SYNC_TRANSFER_BYTES) return { outcome: 'dropped', reason: 'sync transfer byte limit exceeded' };
+        this.receiveEnvelope(decodeEnvelope(wire), fromNodeId);
+      }
+    } catch { return { outcome: 'dropped', reason: 'malformed sync transfer' }; }
     return { outcome: 'delivered', envelope };
   }
 
@@ -368,49 +339,29 @@ export class RelayNode {
     const key = bytesToHex(envelope.header.messageId);
     if (this.seenBroadcasts.has(key)) return { outcome: 'dropped', reason: 'broadcast already seen' };
     this.seenBroadcasts.set(key, Date.now());
-
     const message = decodeBroadcastMessage(envelope.sealedPayload);
     if (!verifyBroadcastMessage(message)) return { outcome: 'dropped', reason: 'invalid broadcast signature' };
-
     for (const listener of this.broadcastListeners) listener(message);
-
     if (envelope.header.ttl > 0) {
-      const forwarded: Envelope = {
-        header: { ...envelope.header, ttl: envelope.header.ttl - 1 },
-        sealedPayload: envelope.sealedPayload,
-      };
-      for (const neighborId of this.transport.discoverNeighbors()) {
-        if (neighborId !== fromNodeId) this.sendEnvelopeOverTransport(neighborId, forwarded);
-      }
+      const forwarded: Envelope = { header: { ...envelope.header, ttl: envelope.header.ttl - 1 }, sealedPayload: envelope.sealedPayload };
+      for (const neighborId of this.transport.discoverNeighbors()) if (neighborId !== fromNodeId) this.sendEnvelopeOverTransport(neighborId, forwarded);
     }
-
     return { outcome: 'broadcast', message };
   }
 
   receiveEnvelope(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
     if (!validateRoutingHeader(envelope.header)) return { outcome: 'dropped', reason: 'invalid header' };
-
-    if (envelope.header.packetType === PacketType.StoreForwardSync) {
-      return this.handleSyncPacket(envelope, fromNodeId);
-    }
-
-    if (envelope.header.packetType === PacketType.EmergencyBroadcast) {
-      return this.handleBroadcastPacket(envelope, fromNodeId);
-    }
+    if (envelope.header.packetType === PacketType.StoreForwardSync) return this.handleSyncPacket(envelope, fromNodeId);
+    if (envelope.header.packetType === PacketType.EmergencyBroadcast) return this.handleBroadcastPacket(envelope, fromNodeId);
 
     if (bytesEqual(envelope.header.destinationHint, this.ownDestinationHint)) {
       if (envelope.header.packetType === PacketType.Ack) {
         const verifiedAck = verifyAckEnvelope(envelope);
         if (!verifiedAck) return { outcome: 'dropped', reason: 'invalid ack signature' };
-
         const ackedIdHex = bytesToHex(verifiedAck.acknowledgedMessageId);
         const pending = this.pendingAcks.get(ackedIdHex);
         if (!pending) return { outcome: 'dropped', reason: 'ack for unknown message' };
-
-        if (!bytesEqual(pending.destinationHint, verifiedAck.signerDestinationHint)) {
-          return { outcome: 'dropped', reason: 'ack signer is not the message destination' };
-        }
-
+        if (!bytesEqual(pending.destinationHint, verifiedAck.signerDestinationHint)) return { outcome: 'dropped', reason: 'ack signer is not the message destination' };
         this.neighborTrust.set(pending.neighborId, (this.neighborTrust.get(pending.neighborId) ?? 0) + 1);
         this.pendingAcks.delete(ackedIdHex);
         for (const listener of this.ackListeners) listener(verifiedAck.acknowledgedMessageId);
@@ -421,13 +372,11 @@ export class RelayNode {
     }
 
     if (envelope.header.ttl <= 0) return { outcome: 'dropped', reason: 'ttl expired' };
-
     const nextHopId = this.routingTable.lookup(envelope.header.destinationHint, this.neighborTrust);
     if (nextHopId) {
       const sent = this.forwardOverTransport(envelope, nextHopId);
       if (sent) return { outcome: 'forwarded', to: nextHopId };
     }
-
     const result = this.queue.store(envelope, fromNodeId ?? 'origin');
     if (result.stored) return { outcome: 'queued' };
     return { outcome: 'dropped', reason: result.reason ?? 'unknown' };
