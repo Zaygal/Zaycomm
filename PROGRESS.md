@@ -5,208 +5,203 @@ This tracks what's actually built and tested, against the RFC series
 lands, it's the map between "what the spec says" and "what code
 actually exists right now."
 
-**Stack:** TypeScript, Node, vitest. Chosen over Rust/Go for Phase 1
-because the whole workflow runs from a phone via GitHub Codespaces,
-where a lighter npm-based toolchain matters more than raw performance.
-See RFC-0010, Section 3 for the full reasoning, including when a Rust
-rewrite of the core might become worth it later.
+**Status: v1.0 shipped.** All seven RFC-0010 phases complete, plus
+every high-priority gap surfaced during implementation has been
+closed. 104 tests passing across 19 files.
 
-**Repo:** `/workspaces/Zaycomm`
+**Stack:** TypeScript, Node, vitest.
+**Repo:** `/workspaces/Zaycomm` (public, github.com/Zaygal/Zaycomm)
 **Run all tests:** `npx vitest run`
 
 ---
 
-## Phase 1 — Direct Link Core (RFC-0010, Section 4) — ✅ COMPLETE
+## Phase 1 — Direct Link Core — ✅ COMPLETE
+`src/crypto/keys.ts`, `handshake.ts`, `ratchet.ts`, `src/envelope/envelope.ts`, `src/identity/identity.ts`
 
-| Component | RFC reference | File | Status |
-|---|---|---|---|
-| X25519 / Ed25519 key generation | RFC-0004 §2.1, §2.2 | `src/crypto/keys.ts` | ✅ Done, 5 tests passing |
-| Noise IK handshake | RFC-0004 §2.3 | `src/crypto/handshake.ts` | ✅ Done, 2 tests passing |
-| Double ratchet | RFC-0004 §2.4 | `src/crypto/ratchet.ts` | ✅ Done, 4 tests passing |
-| Packet envelope | RFC-0006 | `src/envelope/envelope.ts` | ✅ Done, 7 tests passing |
-| Identity (fingerprint, device link/revocation) | RFC-0005 §1, §2.7, §3 | `src/identity/identity.ts` | ✅ Done, 9 tests passing |
+X25519/Ed25519 keys, Noise IK handshake, double ratchet, packet
+envelope, identity with fingerprints and device linking/revocation.
 
-**Known gaps:**
-- The ratchet does not yet handle out-of-order message delivery
-  (RFC-0004's real spec uses a skipped-message-key cache for this).
-  **This is no longer theoretical**: Phase 7's file chunking hit it
-  directly, a real end-to-end test had to send chunks in strict order
-  because decrypting out of order currently fails. Worth prioritizing.
-- Full sender-sealing (RFC-0004 Section 4) is only partially in place.
-  `envelope.ts`'s sealed payload carries the ratchet's ephemeral key
-  as an implicit sender reference, not a properly sealed identity
-  reference, since `identity.ts` isn't wired into the envelope layer.
+## Phase 2 — Identity and Multi-Device — ✅ COMPLETE
+`src/identity/identity.ts`, `src/identity/seal.ts`
 
-## Phase 2 — Identity and Multi-Device
-Substantially covered inside `identity.ts` (fingerprints, device
-linking/revocation) ahead of schedule. Remaining: wire into envelope.ts
-for real sealed-sender support.
+Device linking/revocation from Phase 1. Sealed sender (RFC-0004 §4)
+completed later: sender's identity key wrapped inside the
+ratchet-encrypted plaintext, genuinely sealed via AEAD, not just
+hidden from relays by convention.
 
-## Phase 3 — Local Multi-Hop Routing (RFC-0007 §4, §5) — ✅ COMPLETE
+## Phase 3 — Local Multi-Hop Routing — ✅ COMPLETE
+`src/routing/routing.ts`
 
-| Component | RFC reference | File | Status |
-|---|---|---|---|
-| Destination hints, signed routing advertisements, relay forwarding | RFC-0007 §4, §5 | `src/routing/routing.ts` | ✅ Done, 7 tests passing |
+Destination hints, signed routing advertisements, relay forwarding.
 
-**Known gaps:**
-- Sybil-resistant routing trust (RFC-0007 §6) not implemented, a
-  signature proves who sent an advertisement, not that it should be
-  trusted over an untrusted new identity.
-- Advertisement propagation is manually simulated one hop at a time,
-  not automatic continuous re-broadcast.
+## Phase 4 — Store and Forward — ✅ COMPLETE
+`src/storage/store.ts`, `src/routing/routing.ts`
 
-## Phase 4 — Store and Forward (RFC-0007 §2, RFC-0009) — ✅ COMPLETE
+Queue with no known route, automatic delivery once a route appears.
+Fair allocation keyed to the immediate neighbor, not the sealed
+original sender (RFC-0009 §5, deliberate reinterpretation).
 
-| Component | RFC reference | File | Status |
-|---|---|---|---|
-| Store-and-forward relay queue | RFC-0009 | `src/storage/store.ts` | ✅ Done, 11 tests passing |
-| Automatic delayed delivery on RelayNode | RFC-0007 §2 | `src/routing/routing.ts` | ✅ Integrated |
+## Phase 5 — Additional Transports — ✅ COMPLETE
+`src/transport/transport.ts`, `src/envelope/fragment.ts`
 
-Fair queue allocation is keyed to the **immediate neighbor** that
-handed a message over, not the original sender, since RFC-0006 keeps
-the original sender sealed from relays. Deliberate reinterpretation
-of RFC-0009 §5, not an oversight.
+Bluetooth, Wi-Fi Direct, Internet transports. Fragmentation
+(RFC-0006 §5) now wired directly into every outbound send in
+`RelayNode`, one choke point checks real MTU and auto-fragments,
+nothing sends raw and silently fails anymore.
 
-**Known gaps:**
-- Queue GC is TTL-based only, RFC-0007 §7's ack-triggered early
-  cleanup needs real Ack packets flowing back through the mesh,
-  not built.
-- `getSummary()` existed unused until Phase 6 wired it up.
+**Real finding along the way:** the original string-keyed CBOR
+envelope encoding was too large for a realistic BLE MTU even for a
+2-character message. Fixed with positional (array) CBOR encoding.
 
-## Phase 5 — Additional Transports (RFC-0008) — ✅ COMPLETE
+## Phase 6 — Internet Synchronization — ✅ COMPLETE
+`src/routing/routing.ts` (sync methods), `src/transport/transport.ts`
 
-| Component | RFC reference | File | Status |
-|---|---|---|---|
-| Transport interface, simulated Bluetooth, Wi-Fi Direct, Internet | RFC-0008 §1, §2, §3, §5 | `src/transport/transport.ts` | ✅ Done |
-| Fragmentation and reassembly | RFC-0006 §5 | `src/envelope/fragment.ts` | ✅ Done, 8 tests passing |
+Gateway-to-gateway sync as real summary/request/transfer protocol
+messages, proven on the actual bandwidth-saving property: when both
+sides already overlap, no redundant transfer occurs at all.
 
-**Real finding:** transport tests measured actual encoded byte size
-for the first time and caught that `envelope.ts`'s original
-string-keyed CBOR encoding was too large for a realistic 200-byte BLE
-MTU even for a 2-character message. Fixed with positional (array)
-CBOR encoding, no field names travel on the wire.
-
-**RelayNode / Transport wiring — ✅ COMPLETE.** `routing.ts` now sends
-real bytes through `Transport.send()` instead of calling neighbors
-directly in-process. The sender no longer sees a full multi-hop
-delivery path in its return value, a real transport can't report what
-a recipient did downstream, only whether its own send succeeded. This
-is correct behavior, not a limitation: RFC-0002's metadata
-minimization says a node should only know its own immediate neighbor.
-Delivery is observed via `onDelivered()` listeners at the destination
-instead of path inspection at the sender.
-
-**Known gaps:**
-- Long range radio (RFC-0008 §4) not modeled.
-- Fragmentation exists but isn't wired into the transport `send()`
-  path automatically, callers must fragment manually before sending.
-  Phase 7's file test hit the consequence of this directly (see
-  environment notes below).
-
-## Phase 6 — Internet Synchronization (RFC-0003 §5, RFC-0009 §6) — ✅ COMPLETE
-
-| Component | RFC reference | File | Status |
-|---|---|---|---|
-| Gateway-to-gateway sync (summary/request/transfer) | RFC-0009 §6 | `src/routing/routing.ts` | ✅ Done, 5 tests passing |
-
-Two gateways exchange bounded summaries (message ids and TTL only,
-never content) first, then each requests only what it's missing,
-verified on the actual bandwidth-saving property: when both sides
-already fully overlap, no request/transfer round trip happens at all.
-
-**Known gaps:**
-- `initiateSync()` is a manual trigger, "whenever a node gains
-  Internet connectivity" (RFC-0003 §5) is a lifecycle decision left
+**Known gaps (low priority, by design):**
+- `initiateSync()` is a manual trigger, not automatic on Internet
+  detection (RFC-0003 §5), that's a session-lifecycle decision left
   to the caller.
 - Sync is point-to-point between direct neighbors only, not routed
-  multi-hop.
+  multi-hop across the mesh.
 
-## Phase 7 — Extended Message Types — 🔧 IN PROGRESS
+## Phase 7 — Extended Message Types — ✅ COMPLETE
+`src/message/message.ts`, `src/broadcast/broadcast.ts`, `src/message/file.ts`, `src/message/voice.ts`
 
-| Component | RFC reference | File | Status |
-|---|---|---|---|
-| Application-layer message type tagging | RFC-0003 §7 | `src/message/message.ts` | ✅ Done, 3 tests passing |
-| Emergency broadcast (signed, flooded, loop-prevented) | RFC-0006 §4 | `src/broadcast/broadcast.ts` | ✅ Done, 6 tests passing |
-| File chunking + order-independent reassembly | RFC-0003 §7 | `src/message/file.ts` | ✅ Done, 6 tests passing |
-| Voice frames | RFC-0001 goals | — | ⬜ Not started |
+All four types built: text (application-layer tagging), emergency
+broadcast (signed, flooded, loop-prevented via seen-message-id
+tracking), file chunking (order-*dependent* `FileReassembler`, waits
+for completeness), voice (order-*independent* `VoiceJitterBuffer`,
+never blocks, skips permanently missing frames). The file/voice
+contrast is deliberate: a file with a missing chunk isn't a file yet,
+a late voice frame is worthless for playback either way, the two
+reassembly models are opposites on purpose.
 
-Broadcast content is signed, not ratchet-encrypted, there's no single
-recipient to ratchet with. Flooding uses a seen-message-id set per
-node to prevent infinite re-flooding.
+---
 
-**Real finding, not a hypothetical one:** the full encrypted file
-transfer test initially failed with an "invalid tag" decryption
-error on a chunk that had nothing wrong with it. Root cause: an
-earlier chunk's full envelope exceeded the simulated Bluetooth
-transport's 200-byte MTU and silently failed to send, but
-`ratchet.encrypt()` had already advanced Alice's sending chain before
-that failed send. Bob's receiving chain was then one step behind, so
-the next chunk that did arrive decrypted against the wrong position
-in the chain. Fixed for now by using Wi-Fi Direct (larger MTU) for
-the file transfer test. Real fix, deferred: fragmentation needs to be
-wired into the transport send path itself so an oversized message
-can never silently vanish without the ratchet knowing, tracked
-alongside the Phase 5 fragmentation gap above.
+## Cross-cutting fixes, closed after Phase 7
 
-**Known gaps:**
-- Voice frames not started.
-- File chunks currently require in-order delivery end to end (see
-  Phase 1's ratchet gap above, now a concrete blocker, not a
-  theoretical one).
+These weren't separate RFC phases, they were real gaps that surfaced
+during implementation and got fixed in priority order once understood
+properly, not chased individually as they appeared.
+
+### Skipped-message-key cache (RFC-0004 §2.4) — ✅ COMPLETE
+`src/crypto/ratchet.ts`
+
+Flagged since Phase 1, forced into urgency by Phase 7's file test
+(had to send chunks in strict order to avoid decryption failure).
+Bounded cache (`MAX_SKIP`) so a gap can't grow the cache unboundedly,
+per RFC-0002's storage exhaustion concern. This is what makes voice's
+frame-skipping behavior *safe* to build, not just convenient, a
+dropped frame no longer desyncs everything after it.
+
+### Sealed sender (RFC-0004 §4) — ✅ COMPLETE
+`src/identity/seal.ts`
+
+Sender's identity key wrapped inside the AEAD-protected plaintext,
+not as a separate envelope field only "hidden by convention." Doesn't
+add new authentication, the Noise IK handshake already proved who's
+on the other end of a ratchet session, this gives the application
+layer a sealed way to know *which* contact sent something once more
+than one session is open.
+
+### Fragmentation wired into the transport send path (RFC-0006 §5) — ✅ COMPLETE
+`src/routing/routing.ts`, `src/envelope/fragment.ts`
+
+Covered under Phase 5 above. Known limitation: fragment sends aren't
+atomic, a partial failure leaves the receiver with an incomplete set
+that `purgeStaleFragments()` eventually clears rather than ever
+completing.
+
+### Ack-triggered delivery confirmation (RFC-0007 §7) — ✅ COMPLETE (scoped)
+`src/envelope/envelope.ts` (`createAckEnvelope`), `src/routing/routing.ts` (`sendAck`/`onAckReceived`)
+
+Deliberately **not** automatic inside `RelayNode`: sealed sender means
+the routing layer never decrypts anything and genuinely doesn't know
+who to thank. The application layer, which decrypts and reads the
+sealed sender field, calls `sendAck()` explicitly.
+
+Scoped to **sender-facing delivery confirmation**, a real and useful
+feature, rather than full multi-hop relay queue cleanup, which would
+need either flooding the ack to every possible holder or path
+tracking (removed deliberately for metadata minimization). Relays
+already clear their own queue on successful forward (since Phase 4),
+so the storage-hygiene gap this leaves is narrower than it first
+looked.
+
+### Sybil-resistant routing trust (RFC-0007 §6) — ✅ COMPLETE
+`src/routing/routing.ts`
+
+**Real vulnerability closed, not a hypothetical one:** `RoutingTable`
+used to store one next-hop per destination in a plain `Map`, every
+new advertisement silently overwrote it. A freshly created Sybil
+identity could hijack an already-trusted route just by advertising
+*later*, no signature needed breaking. Now every candidate neighbor
+is remembered, and the one with the highest trust score wins, trust
+earned only through real ack correlation (a neighbor a message was
+routed through gets credited when an ack for that exact message id
+comes back), never inferred from recency or claims alone.
+
+---
+
+## Remaining known gaps (lower priority)
+
+- **Long range radio transport (RFC-0008 §4)** — LoRa, HF packet
+  radio, satellite not modeled, only Bluetooth, Wi-Fi Direct, and
+  Internet exist as transports.
+- **Full multi-hop ack propagation** — see Ack section above, scoped
+  narrower than originally framed once the sealed-sender constraint
+  was understood.
+- **Auto-sync trigger, multi-hop sync routing** — see Phase 6 above.
 
 ---
 
 ## Test count history
 
-| Milestone | Total tests | Notes |
-|---|---|---|
-| Phase 1 start | 5 | keys.ts only |
-| — | 7 | + handshake.ts |
-| — | 11 | + ratchet.ts |
-| — | 18 | + envelope.ts (full Phase 1 end-to-end test) |
-| Phase 1 complete | 27 | + identity.ts |
-| Phase 3 complete | 34 | + routing.ts |
-| Phase 4 complete | 46 | + store.ts, util.ts consolidation |
-| Phase 5 complete | 59 | + transport.ts, fragment.ts, envelope.ts encoding fix |
-| — | 58 | RelayNode wired to real Transport |
-| Phase 6 complete | 63 | + sync protocol, createInternetTransport |
-| — | 72 | + message.ts, broadcast.ts |
-| Phase 7 (partial) | 78 | + file.ts |
+| Milestone | Total tests |
+|---|---|
+| Phase 1 start | 5 |
+| Phase 1 complete | 27 |
+| Phase 3 complete | 34 |
+| Phase 4 complete | 46 |
+| Phase 5 complete | 59 |
+| Phase 6 complete | 63 |
+| Phase 7 first slice (text, broadcast) | 72 |
+| + file.ts | 78 |
+| Skipped-key cache | 83 |
+| Sealed sender | 87 |
+| Fragmentation in transport | 91 |
+| Phase 7 complete (+ voice.ts) | 98 |
+| Ack-triggered confirmation | 101 |
+| **Sybil-resistant trust (current)** | **104** |
 
 ---
 
 ## Environment notes
 
-- Working entirely from GitHub Codespaces via mobile browser, no
-  local machine involved.
-- Verify unfamiliar package export paths before writing imports:
+- Working entirely from GitHub Codespaces via mobile browser.
+- Verify unfamiliar package export paths before importing:
   `cat node_modules/<package>/package.json | grep -A 40 exports`.
-- **`cbor-x`'s `Encoder` reuses an internal buffer across calls**,
-  both `.encode()` and `.decode()`. Every result pulled out that
-  isn't used immediately, once, needs `Uint8Array.from(...)` to force
-  an independent copy. This bit us twice: once on encode (caught by
-  `fragment.ts`'s loop), once on decode (caught by `file.test.ts`'s
-  multi-chunk loop). Applied everywhere now: envelope.ts, routing.ts,
-  broadcast.ts, fragment.ts, file.ts.
-- **A transport `send()` failure (oversized frame) can silently
-  desync the ratchet.** `ratchet.encrypt()` advances the sending
-  chain unconditionally, before the caller knows whether the send
-  will actually succeed. If it doesn't, the receiver's chain falls
-  out of step with the next message that does arrive, surfacing as
-  an unrelated-looking "invalid tag" failure later, not where the
-  real problem happened. Diagnosed by isolating with a single chunk
-  first rather than guessing at the multi-chunk failure directly.
+- **`cbor-x`'s `Encoder` reuses an internal buffer** across both
+  `.encode()` and `.decode()`. Anything not used immediately needs
+  `Uint8Array.from(...)` to force a copy. Applied everywhere now.
+- **A transport `send()` failure can desync the ratchet** if the
+  caller doesn't know the send will fail before encrypting. Root
+  cause of the original file-chunk bug, fixed at the source by
+  fragmentation-in-transport rather than worked around per-call-site.
+- Full-file mobile pastes have occasionally silently failed to save,
+  verify with `grep -c <a-symbol-only-in-the-new-version> <file>`
+  before running tests, don't assume a paste landed.
 - Multi-line text in mobile find-and-replace doesn't reliably match,
-  even when it displays correctly, split any multi-line find into
-  separate single-line edits.
+  split into single-line edits.
 - Watch for autocorrect mangling package names (`@noble` → `@nobles`)
-  and the mobile file-creation flow occasionally turning a `.` into a
-  `/` or creating a folder instead of a file for nested paths, prefer
-  `mkdir -p <dir> && touch <dir>/<file>` from the terminal.
+  and the file-creation flow turning `.` into `/` for nested paths,
+  prefer `mkdir -p <dir> && touch <dir>/<file>`.
 
 ---
 
-*Last updated: Phase 7 in progress, 78 tests passing. Remaining:
-voice frames, then the ratchet out-of-order gap and
-fragmentation-in-transport gap both now have concrete, demonstrated
-justification for prioritizing them.*
+*Last updated: v1.0. All RFC-0010 phases and every high-priority
+implementation gap closed. Remaining work is lower-priority breadth
+(long range radio transport) rather than correctness.*
