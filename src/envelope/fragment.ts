@@ -1,14 +1,5 @@
 // src/envelope/fragment.ts
 // RFC-0006, Section 5: Fragmentation and Reassembly.
-//
-// Phase 5's own transport tests proved this is a real, current gap:
-// a 220 character message correctly fails to cross the simulated
-// Bluetooth transport, because a full encoded envelope simply
-// doesn't fit a realistic BLE MTU. This file closes that gap.
-//
-// Fragmentation is a property of the envelope layer, not any single
-// transport adapter (RFC-0006 Section 5), so this has no idea what
-// transport it's running over, it only needs an MTU number.
 
 import { concatBytes, bytesToHex } from '../util';
 import { Encoder } from 'cbor-x';
@@ -17,6 +8,10 @@ import { type Envelope, encodeEnvelope, decodeEnvelope } from './envelope';
 const cbor = new Encoder();
 
 const FRAGMENT_OVERHEAD_ESTIMATE = 32;
+export const MAX_FRAGMENT_COUNT = 4096;
+export const MAX_FRAGMENT_SIZE = 4096;
+export const MAX_PENDING_FRAGMENT_SETS = 128;
+export const MAX_PENDING_FRAGMENT_BYTES = 2 * 1024 * 1024;
 
 interface Fragment {
   messageId: Uint8Array;
@@ -28,79 +23,71 @@ interface Fragment {
 type EncodedFragmentTuple = [Uint8Array, number, number, Uint8Array];
 
 function encodeFragment(fragment: Fragment): Uint8Array {
-  const tuple: EncodedFragmentTuple = [
-    fragment.messageId,
-    fragment.fragmentIndex,
-    fragment.fragmentCount,
-    fragment.data,
-  ];
-  // cbor-x's Encoder reuses an internal buffer across calls for
-  // performance. Every other call site in this project uses its
-  // result immediately, once. Fragmentation is the first place that
-  // encodes many results in a loop and reads them back later, so a
-  // copy here is required, not optional, or later fragments corrupt
-  // earlier ones sharing the same underlying buffer.
+  const tuple: EncodedFragmentTuple = [fragment.messageId, fragment.fragmentIndex, fragment.fragmentCount, fragment.data];
   return Uint8Array.from(cbor.encode(tuple));
 }
 
 function decodeFragment(bytes: Uint8Array): Fragment {
-  const tuple = cbor.decode(bytes) as EncodedFragmentTuple;
-  return {
-    messageId: Uint8Array.from(tuple[0]),
-    fragmentIndex: tuple[1],
-    fragmentCount: tuple[2],
-    data: Uint8Array.from(tuple[3]),
-  };
+  const tuple = cbor.decode(bytes) as EncodedFragmentTuple;
+  if (!Array.isArray(tuple) || tuple.length !== 4) throw new Error('Invalid fragment');
+  const messageId = Uint8Array.from(tuple[0]);
+  const fragmentIndex = tuple[1];
+  const fragmentCount = tuple[2];
+  const data = Uint8Array.from(tuple[3]);
+  if (messageId.length !== 16) throw new Error('Invalid fragment message ID');
+  if (!Number.isSafeInteger(fragmentIndex) || !Number.isSafeInteger(fragmentCount)) throw new Error('Invalid fragment indexes');
+  if (fragmentCount < 1 || fragmentCount > MAX_FRAGMENT_COUNT) throw new Error('Fragment count exceeds limit');
+  if (fragmentIndex < 0 || fragmentIndex >= fragmentCount) throw new Error('Invalid fragment index');
+  if (data.length > MAX_FRAGMENT_SIZE) throw new Error('Fragment size exceeds limit');
+  return { messageId, fragmentIndex, fragmentCount, data };
 }
 
-/**
- * Splits an envelope into ordered, individually-transmittable wire
- * fragments sized to fit under a given transport's MTU. If the
- * envelope already fits, this returns a single fragment, same code
- * path either way, no special case for "small enough" messages.
- */
 export function fragmentEnvelope(envelope: Envelope, transportMtu: number): Uint8Array[] {
   const fullBytes = encodeEnvelope(envelope);
   const chunkSize = Math.max(1, transportMtu - FRAGMENT_OVERHEAD_ESTIMATE);
   const fragmentCount = Math.ceil(fullBytes.length / chunkSize);
-
+  if (fragmentCount > MAX_FRAGMENT_COUNT) throw new Error('Envelope requires too many fragments');
   const wireFragments: Uint8Array[] = [];
   for (let i = 0; i < fragmentCount; i++) {
     const data = fullBytes.slice(i * chunkSize, (i + 1) * chunkSize);
-    wireFragments.push(
-      encodeFragment({ messageId: envelope.header.messageId, fragmentIndex: i, fragmentCount, data })
-    );
+    wireFragments.push(encodeFragment({ messageId: envelope.header.messageId, fragmentIndex: i, fragmentCount, data }));
   }
   return wireFragments;
 }
 
-/**
- * Accumulates fragments as they arrive, in any order, and reassembles
- * the original envelope once every piece for a given message id has
- * been seen. Multiple in-flight messages are tracked independently by
- * message id, so fragments from different messages interleaving on
- * the wire don't interfere with each other.
- */
 export class FragmentReassembler {
-  private pending = new Map<
-    string,
-    { fragmentCount: number; received: Map<number, Uint8Array>; firstSeenAt: number }
-  >();
+  private pending = new Map<string, { fragmentCount: number; received: Map<number, Uint8Array>; firstSeenAt: number; bytes: number }>();
+  private pendingBytes = 0;
 
   addFragment(wireFragment: Uint8Array): Envelope | null {
-    const fragment = decodeFragment(wireFragment);
-    const key = bytesToHex(fragment.messageId);
-
-    let entry = this.pending.get(key);
-    if (!entry) {
-      entry = { fragmentCount: fragment.fragmentCount, received: new Map(), firstSeenAt: Date.now() };
-      this.pending.set(key, entry);
-    }
-    entry.received.set(fragment.fragmentIndex, fragment.data);
-
-    if (entry.received.size < entry.fragmentCount) {
+    if (wireFragment.length > MAX_FRAGMENT_SIZE + FRAGMENT_OVERHEAD_ESTIMATE + 64) return null;
+    let fragment: Fragment;
+    try {
+      fragment = decodeFragment(wireFragment);
+    } catch {
       return null;
     }
+
+    const key = bytesToHex(fragment.messageId);
+    let entry = this.pending.get(key);
+
+    if (!entry) {
+      if (this.pending.size >= MAX_PENDING_FRAGMENT_SETS) return null;
+      if (fragment.data.length > MAX_PENDING_FRAGMENT_BYTES) return null;
+      entry = { fragmentCount: fragment.fragmentCount, received: new Map(), firstSeenAt: Date.now(), bytes: 0 };
+      this.pending.set(key, entry);
+    } else if (entry.fragmentCount !== fragment.fragmentCount) {
+      return null;
+    }
+
+    if (entry.received.has(fragment.fragmentIndex)) return null;
+    if (this.pendingBytes + fragment.data.length > MAX_PENDING_FRAGMENT_BYTES) return null;
+
+    entry.received.set(fragment.fragmentIndex, fragment.data);
+    entry.bytes += fragment.data.length;
+    this.pendingBytes += fragment.data.length;
+
+    if (entry.received.size < entry.fragmentCount) return null;
 
     const parts: Uint8Array[] = [];
     for (let i = 0; i < entry.fragmentCount; i++) {
@@ -110,7 +97,13 @@ export class FragmentReassembler {
     }
 
     this.pending.delete(key);
-    return decodeEnvelope(concatBytes(...parts));
+    this.pendingBytes -= entry.bytes;
+
+    try {
+      return decodeEnvelope(concatBytes(...parts));
+    } catch {
+      return null;
+    }
   }
 
   purgeStale(maxAgeMs: number): number {
@@ -119,13 +112,13 @@ export class FragmentReassembler {
     for (const [key, entry] of this.pending) {
       if (now - entry.firstSeenAt > maxAgeMs) {
         this.pending.delete(key);
+        this.pendingBytes -= entry.bytes;
         purged++;
       }
     }
     return purged;
   }
 
-  pendingCount(): number {
-    return this.pending.size;
-  }
+  pendingCount(): number { return this.pending.size; }
+  pendingBytesCount(): number { return this.pendingBytes; }
 }
