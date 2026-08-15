@@ -54,6 +54,63 @@ describe('Double ratchet (RFC-0004 Section 2.4)', () => {
     expect(() => bob.decrypt(msg.header, tampered)).toThrow();
   });
 
+  it('does not advance the receiving chain after forged ciphertext', () => {
+    const sharedRootKey = new Uint8Array(32).fill(11);
+    const responderRatchetKeyPair = generateX25519KeyPair();
+    const alice = DoubleRatchet.initAsInitiator(sharedRootKey, responderRatchetKeyPair.publicKey);
+    const bob = DoubleRatchet.initAsResponder(sharedRootKey, responderRatchetKeyPair);
+
+    const msg1 = alice.encrypt(text('message one'));
+    expect(decode(bob.decrypt(msg1.header, msg1.ciphertext))).toBe('message one');
+
+    const msg2 = alice.encrypt(text('message two'));
+    const forged = new Uint8Array(msg2.ciphertext);
+    forged[0] ^= 0xff;
+
+    expect(() => bob.decrypt(msg2.header, forged)).toThrow();
+    expect(decode(bob.decrypt(msg2.header, msg2.ciphertext))).toBe('message two');
+  });
+
+  it('does not change DH ratchet state after a forged new-ratchet packet', () => {
+    const sharedRootKey = new Uint8Array(32).fill(13);
+    const responderRatchetKeyPair = generateX25519KeyPair();
+    const alice = DoubleRatchet.initAsInitiator(sharedRootKey, responderRatchetKeyPair.publicKey);
+    const bob = DoubleRatchet.initAsResponder(sharedRootKey, responderRatchetKeyPair);
+
+    const msg1 = alice.encrypt(text('establish session'));
+    expect(decode(bob.decrypt(msg1.header, msg1.ciphertext))).toBe('establish session');
+
+    const real = alice.encrypt(text('real ratchet message'));
+    const attackerKeyPair = generateX25519KeyPair();
+    const forgedHeader = {
+      ...real.header,
+      dhPublicKey: attackerKeyPair.publicKey,
+    };
+
+    expect(() => bob.decrypt(forgedHeader, new Uint8Array(real.ciphertext))).toThrow();
+    expect(decode(bob.decrypt(real.header, real.ciphertext))).toBe('real ratchet message');
+  });
+
+  it('does not consume a skipped-message key when its ciphertext is forged', () => {
+    const sharedRootKey = new Uint8Array(32).fill(15);
+    const responderRatchetKeyPair = generateX25519KeyPair();
+    const alice = DoubleRatchet.initAsInitiator(sharedRootKey, responderRatchetKeyPair.publicKey);
+    const bob = DoubleRatchet.initAsResponder(sharedRootKey, responderRatchetKeyPair);
+
+    const msg0 = alice.encrypt(text('message zero'));
+    const msg1 = alice.encrypt(text('message one'));
+    const msg2 = alice.encrypt(text('message two'));
+
+    expect(decode(bob.decrypt(msg0.header, msg0.ciphertext))).toBe('message zero');
+    expect(decode(bob.decrypt(msg2.header, msg2.ciphertext))).toBe('message two');
+
+    const forged = new Uint8Array(msg1.ciphertext);
+    forged[0] ^= 0xff;
+    expect(() => bob.decrypt(msg1.header, forged)).toThrow();
+
+    expect(decode(bob.decrypt(msg1.header, msg1.ciphertext))).toBe('message one');
+  });
+
   it('rejects decryption before any sending chain exists on a fresh responder', () => {
     const sharedRootKey = new Uint8Array(32).fill(5);
     const responderRatchetKeyPair = generateX25519KeyPair();
