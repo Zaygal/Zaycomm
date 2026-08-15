@@ -1,21 +1,9 @@
 // src/crypto/ratchet.ts
 // RFC-0004, Section 2.4: Double Ratchet, Signal-style.
 //
-// Now includes the skipped-message-key cache that was flagged as
-// missing all the way back in Phase 1. Three separate things ran
-// into that gap: file chunking needed in-order-only delivery to work
-// around it, voice frames would have hit it on every single dropped
-// packet, and it's the one piece of the real Double Ratchet spec
-// this project was still missing. Fixed here rather than worked
-// around a third time.
-//
-// How it works: when a message arrives ahead of where the receiver
-// expects, the chain key advances forward to that point, and every
-// key it passes along the way gets cached rather than discarded. If
-// an earlier, delayed message later shows up, its key is already
-// waiting, no re-derivation needed. The cache is bounded, a hard cap
-// on how far a single gap may skip, since unbounded growth here is a
-// real storage exhaustion vector per RFC-0002's threat catalog.
+// Skipped-message keys are cached and bounded by MAX_SKIP. Decryption
+// is transactional: hostile ciphertext must authenticate before any
+// ratchet state (including skipped keys or DH-ratchet state) is committed.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
@@ -49,6 +37,41 @@ export interface RatchetHeader {
 
 function encodeHeader(header: RatchetHeader): Uint8Array {
   return concatBytes(header.dhPublicKey, u32le(header.previousChainLength), u32le(header.messageNumber));
+}
+
+type RatchetState = {
+  rootKey: Uint8Array;
+  dhSelf: X25519KeyPair;
+  dhRemote: Uint8Array | null;
+  sendingChainKey: Uint8Array | null;
+  receivingChainKey: Uint8Array | null;
+  sendMessageNumber: number;
+  receiveMessageNumber: number;
+  previousSendingChainLength: number;
+  skippedMessageKeys: Map<string, Uint8Array>;
+};
+
+function copyBytes(value: Uint8Array | null): Uint8Array | null {
+  return value === null ? null : new Uint8Array(value);
+}
+
+function snapshotState(state: RatchetState): RatchetState {
+  return {
+    rootKey: new Uint8Array(state.rootKey),
+    dhSelf: {
+      privateKey: new Uint8Array(state.dhSelf.privateKey),
+      publicKey: new Uint8Array(state.dhSelf.publicKey),
+    },
+    dhRemote: copyBytes(state.dhRemote),
+    sendingChainKey: copyBytes(state.sendingChainKey),
+    receivingChainKey: copyBytes(state.receivingChainKey),
+    sendMessageNumber: state.sendMessageNumber,
+    receiveMessageNumber: state.receiveMessageNumber,
+    previousSendingChainLength: state.previousSendingChainLength,
+    skippedMessageKeys: new Map(
+      Array.from(state.skippedMessageKeys.entries(), ([key, value]) => [key, new Uint8Array(value)])
+    ),
+  };
 }
 
 export class DoubleRatchet {
@@ -87,20 +110,42 @@ export class DoubleRatchet {
     return new DoubleRatchet(rootKey, ownRatchetKeyPair, null, null, null);
   }
 
+  private getState(): RatchetState {
+    return {
+      rootKey: this.rootKey,
+      dhSelf: this.dhSelf,
+      dhRemote: this.dhRemote,
+      sendingChainKey: this.sendingChainKey,
+      receivingChainKey: this.receivingChainKey,
+      sendMessageNumber: this.sendMessageNumber,
+      receiveMessageNumber: this.receiveMessageNumber,
+      previousSendingChainLength: this.previousSendingChainLength,
+      skippedMessageKeys: this.skippedMessageKeys,
+    };
+  }
+
+  private restoreState(state: RatchetState): void {
+    this.rootKey = state.rootKey;
+    this.dhSelf = state.dhSelf;
+    this.dhRemote = state.dhRemote;
+    this.sendingChainKey = state.sendingChainKey;
+    this.receivingChainKey = state.receivingChainKey;
+    this.sendMessageNumber = state.sendMessageNumber;
+    this.receiveMessageNumber = state.receiveMessageNumber;
+    this.previousSendingChainLength = state.previousSendingChainLength;
+    this.skippedMessageKeys = state.skippedMessageKeys;
+  }
+
   private skipKey(dhPublicKey: Uint8Array, messageNumber: number): string {
     return `${bytesToHex(dhPublicKey)}:${messageNumber}`;
   }
 
-  /** Looks for a cached key from a previously skipped-ahead message.
-   * One-time use, removed once consumed. */
-  private trySkippedMessageKey(header: RatchetHeader): Uint8Array | null {
-    const key = this.skipKey(header.dhPublicKey, header.messageNumber);
-    const messageKey = this.skippedMessageKeys.get(key);
-    if (messageKey) {
-      this.skippedMessageKeys.delete(key);
-      return messageKey;
-    }
-    return null;
+  /** Looks for a cached key without consuming it. It is removed only
+   * after the ciphertext authenticates successfully. */
+  private getSkippedMessageKey(header: RatchetHeader): { cacheKey: string; messageKey: Uint8Array } | null {
+    const cacheKey = this.skipKey(header.dhPublicKey, header.messageNumber);
+    const messageKey = this.skippedMessageKeys.get(cacheKey);
+    return messageKey ? { cacheKey, messageKey } : null;
   }
 
   /** Advances the current receiving chain up to (not including)
@@ -170,28 +215,41 @@ export class DoubleRatchet {
   }
 
   decrypt(header: RatchetHeader, ciphertext: Uint8Array, associatedData: Uint8Array = new Uint8Array(0)): Uint8Array {
-    const skippedKey = this.trySkippedMessageKey(header);
-    if (skippedKey) {
-      return this.openWithMessageKey(skippedKey, header, ciphertext, associatedData);
+    // Decryption is transactional. All ratchet mutations happen on the
+    // live object only until authentication succeeds; any failure restores
+    // the exact pre-packet state, preventing forged ciphertext from causing
+    // ratchet desynchronization or consuming skipped-message keys.
+    const before = snapshotState(this.getState());
+
+    try {
+      const skipped = this.getSkippedMessageKey(header);
+      if (skipped) {
+        const plaintext = this.openWithMessageKey(skipped.messageKey, header, ciphertext, associatedData);
+        this.skippedMessageKeys.delete(skipped.cacheKey);
+        return plaintext;
+      }
+
+      if (this.dhRemote === null || !bytesEqual(header.dhPublicKey, this.dhRemote)) {
+        // Before abandoning the current receiving chain, cache keys for
+        // any messages from it that never arrived, per the header's own
+        // record of how many messages that chain contained.
+        this.skipMessageKeysUntil(header.previousChainLength);
+        this.performDhRatchetStep(header.dhPublicKey);
+      }
+
+      this.skipMessageKeysUntil(header.messageNumber);
+
+      if (this.receivingChainKey === null) {
+        throw new Error('No receiving chain established yet.');
+      }
+      const { messageKey, nextChainKey } = kdfChainKey(this.receivingChainKey);
+      this.receivingChainKey = nextChainKey;
+      this.receiveMessageNumber++;
+
+      return this.openWithMessageKey(messageKey, header, ciphertext, associatedData);
+    } catch (error) {
+      this.restoreState(before);
+      throw error;
     }
-
-    if (this.dhRemote === null || !bytesEqual(header.dhPublicKey, this.dhRemote)) {
-      // Before abandoning the current receiving chain, cache keys for
-      // any messages from it that never arrived, per the header's own
-      // record of how many messages that chain contained.
-      this.skipMessageKeysUntil(header.previousChainLength);
-      this.performDhRatchetStep(header.dhPublicKey);
-    }
-
-    this.skipMessageKeysUntil(header.messageNumber);
-
-    if (this.receivingChainKey === null) {
-      throw new Error('No receiving chain established yet.');
-    }
-    const { messageKey, nextChainKey } = kdfChainKey(this.receivingChainKey);
-    this.receivingChainKey = nextChainKey;
-    this.receiveMessageNumber++;
-
-    return this.openWithMessageKey(messageKey, header, ciphertext, associatedData);
   }
 }
