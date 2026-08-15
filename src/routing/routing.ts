@@ -266,6 +266,7 @@ export class RelayNode {
 
     const expectsAck = envelope.header.packetType === PacketType.Data;
     if (expectsAck) {
+      // Register before transport delivery: in-memory transports may deliver ACKs synchronously.
       this.recordPendingAck(envelope.header.messageId, nextHopId, envelope.header.destinationHint);
     }
 
