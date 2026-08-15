@@ -197,7 +197,19 @@ export class RelayNode {
 
   sendAck(destinationHint: Uint8Array, acknowledgedMessageId: Uint8Array): void {
     const ackEnvelope = createAckEnvelope(destinationHint, acknowledgedMessageId, this.identity);
-    this.receiveEnvelope(ackEnvelope, null);
+
+    if (bytesEqual(destinationHint, this.ownDestinationHint)) {
+      this.receiveEnvelope(ackEnvelope, null);
+      return;
+    }
+
+    const nextHopId = this.routingTable.lookup(destinationHint, this.neighborTrust);
+    if (nextHopId) {
+      if (this.sendEnvelopeOverTransport(nextHopId, ackEnvelope)) return;
+    }
+
+    const result = this.queue.store(ackEnvelope, 'origin');
+    if (!result.stored) return;
   }
 
   private recordPendingAck(messageId: Uint8Array, neighborId: string, destinationHint: Uint8Array): void {
