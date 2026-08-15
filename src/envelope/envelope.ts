@@ -6,15 +6,15 @@ import { randomBytes } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { signMessage, verifySignature } from '../crypto/keys';
 import type { Identity } from '../identity/identity';
-import type { RatchetHeader } from '../crypto/ratchet';
+import type { DoubleRatchet, RatchetHeader } from '../crypto/ratchet';
 import { concatBytes, u64le } from '../util';
 
 const cbor = new Encoder();
-
 const PROTOCOL_VERSION = 1;
 const DEFAULT_TTL = 16;
 const TIMESTAMP_GRANULARITY_SECONDS = 60;
 const ACK_CONTEXT = new TextEncoder().encode('ZAYCOMM_DELIVERY_ACK_V1');
+const DATA_AAD_CONTEXT = new TextEncoder().encode('ZAYCOMM_DATA_ENVELOPE_AAD_V1');
 const DESTINATION_HINT_LENGTH = 8;
 
 export enum PacketType {
@@ -65,6 +65,18 @@ function tupleToHeader(tuple: EncodedHeaderTuple): RoutingHeader {
   };
 }
 
+/** Immutable routing fields authenticated by the ratchet AEAD. TTL is excluded because relays mutate it. */
+export function encodeDataEnvelopeAssociatedData(header: RoutingHeader): Uint8Array {
+  return concatBytes(
+    DATA_AAD_CONTEXT,
+    new Uint8Array([header.version & 0xff]),
+    new Uint8Array([header.packetType & 0xff]),
+    header.messageId,
+    header.destinationHint,
+    u64le(header.timestamp)
+  );
+}
+
 export function createDataEnvelope(
   destinationHint: Uint8Array,
   ratchetHeader: RatchetHeader,
@@ -79,16 +91,41 @@ export function createDataEnvelope(
     destinationHint,
     timestamp: coarseTimestamp(),
   };
-
   const sealedTuple: EncodedSealedPayloadTuple = [
     ratchetHeader.dhPublicKey,
     ratchetHeader.previousChainLength,
     ratchetHeader.messageNumber,
     ciphertext,
   ];
-  const sealedPayload = Uint8Array.from(cbor.encode(sealedTuple));
+  return { header, sealedPayload: Uint8Array.from(cbor.encode(sealedTuple)) };
+}
 
-  return { header, sealedPayload };
+/** Secure constructor: creates the immutable header before encrypting and authenticates it as AEAD AAD. */
+export function createAuthenticatedDataEnvelope(
+  destinationHint: Uint8Array,
+  ratchet: DoubleRatchet,
+  plaintext: Uint8Array,
+  ttl: number = DEFAULT_TTL
+): Envelope {
+  const header: RoutingHeader = {
+    version: PROTOCOL_VERSION,
+    packetType: PacketType.Data,
+    messageId: randomBytes(16),
+    ttl,
+    destinationHint: Uint8Array.from(destinationHint),
+    timestamp: coarseTimestamp(),
+  };
+  const { header: ratchetHeader, ciphertext } = ratchet.encrypt(
+    plaintext,
+    encodeDataEnvelopeAssociatedData(header)
+  );
+  const sealedTuple: EncodedSealedPayloadTuple = [
+    ratchetHeader.dhPublicKey,
+    ratchetHeader.previousChainLength,
+    ratchetHeader.messageNumber,
+    ciphertext,
+  ];
+  return { header, sealedPayload: Uint8Array.from(cbor.encode(sealedTuple)) };
 }
 
 export function openDataEnvelope(
@@ -103,6 +140,13 @@ export function openDataEnvelope(
     },
     ciphertext: Uint8Array.from(tuple[3]),
   };
+}
+
+/** Secure opener: verifies the immutable outer header through the ratchet AEAD before releasing plaintext. */
+export function openAuthenticatedDataEnvelope(envelope: Envelope, ratchet: DoubleRatchet): Uint8Array {
+  if (envelope.header.packetType !== PacketType.Data) throw new Error('Not a data envelope.');
+  const { ratchetHeader, ciphertext } = openDataEnvelope(envelope);
+  return ratchet.decrypt(ratchetHeader, ciphertext, encodeDataEnvelopeAssociatedData(envelope.header));
 }
 
 export function encodeEnvelope(envelope: Envelope): Uint8Array {
@@ -127,13 +171,6 @@ export function createSyncEnvelope(payload: Uint8Array, ttl: number = DEFAULT_TT
   return { header, sealedPayload: payload };
 }
 
-/**
- * Creates an authenticated delivery receipt. The ACK signer is the
- * destination that received the original message. The signer public
- * key is carried in the signed payload; its destination hint is later
- * checked against the destination hint recorded when the packet was
- * forwarded, so an arbitrary peer cannot manufacture routing trust.
- */
 export function createAckEnvelope(
   destinationHint: Uint8Array,
   acknowledgedMessageId: Uint8Array,
@@ -148,16 +185,10 @@ export function createAckEnvelope(
     destinationHint,
     timestamp: coarseTimestamp(),
   };
-
   const signerDestinationHint = sha256(signer.publicKey).slice(0, DESTINATION_HINT_LENGTH);
   const signingMessage = concatBytes(ACK_CONTEXT, signerDestinationHint, acknowledgedMessageId, signer.publicKey);
   const signature = signMessage(signingMessage, signer.privateKey);
-  const sealedPayload = Uint8Array.from(cbor.encode([
-    acknowledgedMessageId,
-    signer.publicKey,
-    signature,
-  ] satisfies EncodedAckPayloadTuple));
-
+  const sealedPayload = Uint8Array.from(cbor.encode([acknowledgedMessageId, signer.publicKey, signature] satisfies EncodedAckPayloadTuple));
   return { header, sealedPayload };
 }
 
@@ -169,19 +200,15 @@ export interface VerifiedAck {
 
 export function verifyAckEnvelope(envelope: Envelope): VerifiedAck | null {
   if (envelope.header.packetType !== PacketType.Ack) return null;
-
   try {
     const tuple = cbor.decode(envelope.sealedPayload) as EncodedAckPayloadTuple;
     if (!Array.isArray(tuple) || tuple.length !== 3) return null;
-
     const acknowledgedMessageId = Uint8Array.from(tuple[0]);
     const signerPublicKey = Uint8Array.from(tuple[1]);
     const signature = Uint8Array.from(tuple[2]);
     const signerDestinationHint = sha256(signerPublicKey).slice(0, DESTINATION_HINT_LENGTH);
     const signingMessage = concatBytes(ACK_CONTEXT, signerDestinationHint, acknowledgedMessageId, signerPublicKey);
-
     if (!verifySignature(signature, signingMessage, signerPublicKey)) return null;
-
     return { acknowledgedMessageId, signerPublicKey, signerDestinationHint };
   } catch {
     return null;
@@ -203,10 +230,8 @@ export function createBroadcastEnvelope(payload: Uint8Array, ttl: number = DEFAU
 export function validateRoutingHeader(header: RoutingHeader, maxAgeSeconds: number = 3600): boolean {
   if (header.version !== PROTOCOL_VERSION) return false;
   if (header.ttl <= 0) return false;
-
   const now = Math.floor(Date.now() / 1000);
   if (header.timestamp > now + TIMESTAMP_GRANULARITY_SECONDS) return false;
   if (now - header.timestamp > maxAgeSeconds) return false;
-
   return true;
 }
