@@ -7,7 +7,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { signMessage, verifySignature } from '../crypto/keys';
 import type { Identity } from '../identity/identity';
 import type { RatchetHeader } from '../crypto/ratchet';
-import { concatBytes, u64le, bytesEqual } from '../util';
+import { concatBytes, u64le } from '../util';
 
 const cbor = new Encoder();
 
@@ -128,10 +128,11 @@ export function createSyncEnvelope(payload: Uint8Array, ttl: number = DEFAULT_TT
 }
 
 /**
- * Creates a cryptographically authenticated delivery receipt.
- * The signer key is included in the signed payload and must hash to
- * the original destination hint. This prevents arbitrary peers from
- * manufacturing ACKs that would inflate routing trust.
+ * Creates an authenticated delivery receipt. The ACK signer is the
+ * destination that received the original message. The signer public
+ * key is carried in the signed payload; its destination hint is later
+ * checked against the destination hint recorded when the packet was
+ * forwarded, so an arbitrary peer cannot manufacture routing trust.
  */
 export function createAckEnvelope(
   destinationHint: Uint8Array,
@@ -148,8 +149,8 @@ export function createAckEnvelope(
     timestamp: coarseTimestamp(),
   };
 
-  const signerHint = sha256(signer.publicKey).slice(0, DESTINATION_HINT_LENGTH);
-  const signingMessage = concatBytes(ACK_CONTEXT, signerHint, acknowledgedMessageId, signer.publicKey);
+  const signerDestinationHint = sha256(signer.publicKey).slice(0, DESTINATION_HINT_LENGTH);
+  const signingMessage = concatBytes(ACK_CONTEXT, signerDestinationHint, acknowledgedMessageId, signer.publicKey);
   const signature = signMessage(signingMessage, signer.privateKey);
   const sealedPayload = Uint8Array.from(cbor.encode([
     acknowledgedMessageId,
@@ -166,7 +167,6 @@ export interface VerifiedAck {
   signerDestinationHint: Uint8Array;
 }
 
-/** Returns null for any malformed, forged, or identity-mismatched ACK. */
 export function verifyAckEnvelope(envelope: Envelope): VerifiedAck | null {
   if (envelope.header.packetType !== PacketType.Ack) return null;
 
@@ -178,9 +178,8 @@ export function verifyAckEnvelope(envelope: Envelope): VerifiedAck | null {
     const signerPublicKey = Uint8Array.from(tuple[1]);
     const signature = Uint8Array.from(tuple[2]);
     const signerDestinationHint = sha256(signerPublicKey).slice(0, DESTINATION_HINT_LENGTH);
-
-    if (!bytesEqual(envelope.header.destinationHint, envelope.header.destinationHint)) return null;
     const signingMessage = concatBytes(ACK_CONTEXT, signerDestinationHint, acknowledgedMessageId, signerPublicKey);
+
     if (!verifySignature(signature, signingMessage, signerPublicKey)) return null;
 
     return { acknowledgedMessageId, signerPublicKey, signerDestinationHint };
