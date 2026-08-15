@@ -1,18 +1,6 @@
 // src/routing/routing.ts
 // RFC-0007, Sections 2, 4, 5, 6, and 7, RFC-0009 Section 6, RFC-0006
-// Section 4's emergency broadcast, and RFC-0006 Section 5
-// fragmentation, wired into the actual send path.
-//
-// RFC-0007 Section 6: RoutingTable now remembers EVERY neighbor that
-// has ever advertised reachability to a destination, not just the
-// most recent one, and picks among them by earned trust rather than
-// recency. Before this, a single Map overwrite meant a freshly
-// created Sybil identity could silently hijack an already-proven
-// route just by advertising later, no signature needed breaking.
-// Trust is earned the only honest way this codebase can observe end
-// to end: a neighbor a message was routed through gets credited when
-// an ack for that exact message id comes back. A neighbor never
-// observed delivering anything starts at zero and stays there.
+// Section 4's emergency broadcast, and RFC-0006 Section 5 fragmentation.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { Encoder } from 'cbor-x';
@@ -27,6 +15,7 @@ import {
   createSyncEnvelope,
   createBroadcastEnvelope,
   createAckEnvelope,
+  verifyAckEnvelope,
 } from '../envelope/envelope';
 import { fragmentEnvelope, FragmentReassembler } from '../envelope/fragment';
 import { concatBytes, bytesEqual, bytesToHex, u64le } from '../util';
@@ -97,12 +86,6 @@ class RoutingTable {
     }
   }
 
-  /**
-   * Picks the best next hop among every neighbor that has ever
-   * advertised reachability to this destination, preferring the
-   * highest observed trust score, not whichever advertised most
-   * recently.
-   */
   lookup(destinationHint: Uint8Array, trustScores: Map<string, number>): string | null {
     const candidates = this.routes.get(bytesToHex(destinationHint));
     if (!candidates || candidates.size === 0) return null;
@@ -134,6 +117,7 @@ export type DeliveryResult =
 
 type SyncSummaryEntry = [Uint8Array, number];
 type SyncPayloadTuple = [0, SyncSummaryEntry[]] | [1, Uint8Array[]] | [2, Uint8Array[]];
+type PendingAck = { neighborId: string; destinationHint: Uint8Array };
 
 export class RelayNode {
   readonly id: string;
@@ -148,7 +132,7 @@ export class RelayNode {
   private ackListeners: ((acknowledgedMessageId: Uint8Array) => void)[] = [];
   private seenBroadcasts = new Map<string, number>();
   private neighborTrust = new Map<string, number>();
-  private pendingAcks = new Map<string, string>();
+  private pendingAcks = new Map<string, PendingAck>();
 
   constructor(id: string, identity: Identity, transport: Transport) {
     this.id = id;
@@ -162,9 +146,7 @@ export class RelayNode {
 
       if (kind === FRAME_KIND_FRAGMENT) {
         const reassembled = this.reassembler.addFragment(body);
-        if (reassembled) {
-          this.receiveEnvelope(reassembled, fromNeighborId);
-        }
+        if (reassembled) this.receiveEnvelope(reassembled, fromNeighborId);
         return;
       }
 
@@ -193,10 +175,6 @@ export class RelayNode {
     return this.queue.size();
   }
 
-  /** Zero for any neighbor never observed delivering anything, per
-   * RFC-0007 Section 6: new or unverified identities start with low
-   * routing trust and earn priority only through observed reliable
-   * behavior over time. */
   neighborTrustScore(neighborId: string): number {
     return this.neighborTrust.get(neighborId) ?? 0;
   }
@@ -218,16 +196,16 @@ export class RelayNode {
   }
 
   sendAck(destinationHint: Uint8Array, acknowledgedMessageId: Uint8Array): void {
-    const ackEnvelope = createAckEnvelope(destinationHint, acknowledgedMessageId);
+    const ackEnvelope = createAckEnvelope(destinationHint, acknowledgedMessageId, this.identity);
     this.receiveEnvelope(ackEnvelope, null);
   }
 
-  private recordPendingAck(messageId: Uint8Array, neighborId: string): void {
+  private recordPendingAck(messageId: Uint8Array, neighborId: string, destinationHint: Uint8Array): void {
     if (this.pendingAcks.size >= MAX_PENDING_ACKS) {
       const oldestKey = this.pendingAcks.keys().next().value;
       if (oldestKey !== undefined) this.pendingAcks.delete(oldestKey);
     }
-    this.pendingAcks.set(bytesToHex(messageId), neighborId);
+    this.pendingAcks.set(bytesToHex(messageId), { neighborId, destinationHint: Uint8Array.from(destinationHint) });
   }
 
   private sendEnvelopeOverTransport(neighborId: string, envelope: Envelope): boolean {
@@ -251,16 +229,12 @@ export class RelayNode {
   broadcast(content: Uint8Array, ttl: number = DEFAULT_BROADCAST_TTL): void {
     const message = createBroadcastMessage(this.identity, content);
     const envelope = createBroadcastEnvelope(encodeBroadcastMessage(message), ttl);
-    for (const neighborId of this.transport.discoverNeighbors()) {
-      this.sendEnvelopeOverTransport(neighborId, envelope);
-    }
+    for (const neighborId of this.transport.discoverNeighbors()) this.sendEnvelopeOverTransport(neighborId, envelope);
   }
 
   receiveAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): void {
     this.routingTable.learnFromAdvertisement(fromNeighborId, ad);
-    for (const hint of ad.reachableDestinations) {
-      this.attemptQueuedDelivery(hint);
-    }
+    for (const hint of ad.reachableDestinations) this.attemptQueuedDelivery(hint);
   }
 
   private attemptQueuedDelivery(destinationHint: Uint8Array): void {
@@ -279,7 +253,7 @@ export class RelayNode {
     };
     const sent = this.sendEnvelopeOverTransport(nextHopId, forwardedEnvelope);
     if (sent && envelope.header.packetType === PacketType.Data) {
-      this.recordPendingAck(envelope.header.messageId, nextHopId);
+      this.recordPendingAck(envelope.header.messageId, nextHopId, envelope.header.destinationHint);
     }
     return sent;
   }
@@ -292,9 +266,7 @@ export class RelayNode {
   }
 
   private handleSyncPacket(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
-    if (!fromNodeId) {
-      return { outcome: 'dropped', reason: 'sync packet with no sender' };
-    }
+    if (!fromNodeId) return { outcome: 'dropped', reason: 'sync packet with no sender' };
 
     const tuple = cbor.decode(envelope.sealedPayload) as SyncPayloadTuple;
 
@@ -328,15 +300,11 @@ export class RelayNode {
 
   private handleBroadcastPacket(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
     const key = bytesToHex(envelope.header.messageId);
-    if (this.seenBroadcasts.has(key)) {
-      return { outcome: 'dropped', reason: 'broadcast already seen' };
-    }
+    if (this.seenBroadcasts.has(key)) return { outcome: 'dropped', reason: 'broadcast already seen' };
     this.seenBroadcasts.set(key, Date.now());
 
     const message = decodeBroadcastMessage(envelope.sealedPayload);
-    if (!verifyBroadcastMessage(message)) {
-      return { outcome: 'dropped', reason: 'invalid broadcast signature' };
-    }
+    if (!verifyBroadcastMessage(message)) return { outcome: 'dropped', reason: 'invalid broadcast signature' };
 
     for (const listener of this.broadcastListeners) listener(message);
 
@@ -346,9 +314,7 @@ export class RelayNode {
         sealedPayload: envelope.sealedPayload,
       };
       for (const neighborId of this.transport.discoverNeighbors()) {
-        if (neighborId !== fromNodeId) {
-          this.sendEnvelopeOverTransport(neighborId, forwarded);
-        }
+        if (neighborId !== fromNodeId) this.sendEnvelopeOverTransport(neighborId, forwarded);
       }
     }
 
@@ -356,9 +322,7 @@ export class RelayNode {
   }
 
   receiveEnvelope(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
-    if (!validateRoutingHeader(envelope.header)) {
-      return { outcome: 'dropped', reason: 'invalid header' };
-    }
+    if (!validateRoutingHeader(envelope.header)) return { outcome: 'dropped', reason: 'invalid header' };
 
     if (envelope.header.packetType === PacketType.StoreForwardSync) {
       return this.handleSyncPacket(envelope, fromNodeId);
@@ -370,22 +334,27 @@ export class RelayNode {
 
     if (bytesEqual(envelope.header.destinationHint, this.ownDestinationHint)) {
       if (envelope.header.packetType === PacketType.Ack) {
-        const ackedIdHex = bytesToHex(envelope.sealedPayload);
-        const creditedNeighbor = this.pendingAcks.get(ackedIdHex);
-        if (creditedNeighbor) {
-          this.neighborTrust.set(creditedNeighbor, (this.neighborTrust.get(creditedNeighbor) ?? 0) + 1);
-          this.pendingAcks.delete(ackedIdHex);
+        const verifiedAck = verifyAckEnvelope(envelope);
+        if (!verifiedAck) return { outcome: 'dropped', reason: 'invalid ack signature' };
+
+        const ackedIdHex = bytesToHex(verifiedAck.acknowledgedMessageId);
+        const pending = this.pendingAcks.get(ackedIdHex);
+        if (!pending) return { outcome: 'dropped', reason: 'ack for unknown message' };
+
+        if (!bytesEqual(pending.destinationHint, verifiedAck.signerDestinationHint)) {
+          return { outcome: 'dropped', reason: 'ack signer is not the message destination' };
         }
-        for (const listener of this.ackListeners) listener(envelope.sealedPayload);
+
+        this.neighborTrust.set(pending.neighborId, (this.neighborTrust.get(pending.neighborId) ?? 0) + 1);
+        this.pendingAcks.delete(ackedIdHex);
+        for (const listener of this.ackListeners) listener(verifiedAck.acknowledgedMessageId);
       } else {
         for (const listener of this.deliveryListeners) listener(envelope);
       }
       return { outcome: 'delivered', envelope };
     }
 
-    if (envelope.header.ttl <= 0) {
-      return { outcome: 'dropped', reason: 'ttl expired' };
-    }
+    if (envelope.header.ttl <= 0) return { outcome: 'dropped', reason: 'ttl expired' };
 
     const nextHopId = this.routingTable.lookup(envelope.header.destinationHint, this.neighborTrust);
     if (nextHopId) {
@@ -394,9 +363,7 @@ export class RelayNode {
     }
 
     const result = this.queue.store(envelope, fromNodeId ?? 'origin');
-    if (result.stored) {
-      return { outcome: 'queued' };
-    }
+    if (result.stored) return { outcome: 'queued' };
     return { outcome: 'dropped', reason: result.reason ?? 'unknown' };
   }
 }
