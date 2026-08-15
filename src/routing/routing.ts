@@ -140,18 +140,27 @@ export class RelayNode {
     this.transport = transport;
     this.ownDestinationHint = computeDestinationHint(identity.publicKey);
     this.transport.onReceive((fromNeighborId, frame) => {
-      if (frame.length === 0) return;
-      const kind = frame[0];
-      const body = frame.slice(1);
+      // The transport boundary is hostile input. No decoder, parser, or
+      // application callback is allowed to terminate the node on malformed data.
+      try {
+        if (frame.length === 0) return;
+        const kind = frame[0];
+        const body = frame.slice(1);
 
-      if (kind === FRAME_KIND_FRAGMENT) {
-        const reassembled = this.reassembler.addFragment(body);
-        if (reassembled) this.receiveEnvelope(reassembled, fromNeighborId);
+        if (kind === FRAME_KIND_FRAGMENT) {
+          const reassembled = this.reassembler.addFragment(body);
+          if (reassembled) this.receiveEnvelope(reassembled, fromNeighborId);
+          return;
+        }
+
+        if (kind !== FRAME_KIND_ENVELOPE) return;
+        const envelope = decodeEnvelope(body);
+        this.receiveEnvelope(envelope, fromNeighborId);
+      } catch {
+        // Malformed/untrusted wire input is dropped. Never propagate a
+        // decoder exception through the transport event loop.
         return;
       }
-
-      const envelope = decodeEnvelope(body);
-      this.receiveEnvelope(envelope, fromNeighborId);
     });
   }
 
@@ -266,7 +275,6 @@ export class RelayNode {
 
     const expectsAck = envelope.header.packetType === PacketType.Data;
     if (expectsAck) {
-      // Register before transport delivery: in-memory transports may deliver ACKs synchronously.
       this.recordPendingAck(envelope.header.messageId, nextHopId, envelope.header.destinationHint);
     }
 
