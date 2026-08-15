@@ -10,6 +10,8 @@ const text = (s: string) => new TextEncoder().encode(s);
 
 function connectNodes(a: RelayNode, b: RelayNode): void {
   (a.transport as SimulatedTransport).connectPeer(b.transport as SimulatedTransport);
+  a.registerAuthenticatedPeer(b.id, b.identity.publicKey);
+  b.registerAuthenticatedPeer(a.id, a.identity.publicKey);
 }
 
 function makeEnvelope(seed: number) {
@@ -32,8 +34,7 @@ describe('Gateway sync (RFC-0009 Section 6)', () => {
     expect(a.queueSize()).toBe(1);
     expect(b.queueSize()).toBe(0);
 
-    a.initiateSync('b');
-
+    expect(a.initiateSync('b')).toBe(true);
     expect(b.queueSize()).toBe(1);
   });
 
@@ -53,8 +54,7 @@ describe('Gateway sync (RFC-0009 Section 6)', () => {
       return originalSend(neighborId, frame);
     };
 
-    a.initiateSync('b');
-
+    expect(a.initiateSync('b')).toBe(true);
     expect(sendCount).toBe(1);
     expect(a.queueSize()).toBe(1);
     expect(b.queueSize()).toBe(1);
@@ -75,7 +75,6 @@ describe('Gateway sync (RFC-0009 Section 6)', () => {
     expect(b.queueSize()).toBe(1);
 
     a.initiateSync('b');
-
     expect(b.queueSize()).toBe(2);
   });
 
@@ -104,9 +103,7 @@ describe('Gateway sync (RFC-0009 Section 6)', () => {
     connectNodes(b, c);
 
     let delivered = false;
-    c.onDelivered(() => {
-      delivered = true;
-    });
+    c.onDelivered(() => { delivered = true; });
 
     const cHint = computeDestinationHint(c.identity.publicKey);
     const cAd = createRoutingAdvertisement(c.identity, [cHint]);
