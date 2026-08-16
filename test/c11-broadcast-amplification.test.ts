@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createIdentity } from '../src/identity/identity';
+import { signMessage } from '../src/crypto/keys';
+import { concatBytes, u64le } from '../src/util';
 import {
   createBroadcastMessage,
   encodeBroadcastMessage,
@@ -11,6 +13,18 @@ import { RelayNode } from '../src/routing/routing';
 import { createBluetoothTransport } from '../src/transport/transport';
 
 const text = (s: string) => new TextEncoder().encode(s);
+const BROADCAST_CONTEXT = new TextEncoder().encode('ZAYCOMM_BROADCAST_V1');
+
+function manuallySignedBroadcast(origin: ReturnType<typeof createIdentity>, content: Uint8Array) {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signingMessage = concatBytes(BROADCAST_CONTEXT, u64le(timestamp), content);
+  return {
+    senderPublicKey: origin.publicKey,
+    content,
+    timestamp,
+    signature: signMessage(signingMessage, origin.privateKey),
+  };
+}
 
 describe('C11 broadcast amplification resistance', () => {
   it('rejects an oversized broadcast before signing it', () => {
@@ -26,8 +40,17 @@ describe('C11 broadcast amplification resistance', () => {
     relay.onBroadcastReceived(() => { delivered++; });
 
     const accepted = MAX_BROADCASTS_PER_ORIGIN_PER_WINDOW;
-    for (let i = 0; i < accepted + 2; i++) {
+    for (let i = 0; i < accepted; i++) {
       const message = createBroadcastMessage(origin, text(`unique-${i}`));
+      const envelope = createBroadcastEnvelope(encodeBroadcastMessage(message), 2);
+      relay.receiveEnvelope(envelope, 'origin');
+    }
+
+    // Generate additional valid signatures without consuming the origin's
+    // creation API quota; this models an attacker that already controls a
+    // legitimate signing key and floods a receiving node.
+    for (let i = accepted; i < accepted + 2; i++) {
+      const message = manuallySignedBroadcast(origin, text(`unique-${i}`));
       const envelope = createBroadcastEnvelope(encodeBroadcastMessage(message), 2);
       relay.receiveEnvelope(envelope, 'origin');
     }
