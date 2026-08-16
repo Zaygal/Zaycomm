@@ -33,7 +33,7 @@ Queue with no known route and automatic delivery once a route appears. Fair allo
 ## Phase 5 — Additional Transports — ✅ COMPLETE
 `src/transport/transport.ts`, `src/envelope/fragment.ts`
 
-Bluetooth, Wi-Fi Direct, Internet transports, and centralized MTU-aware fragmentation are implemented.
+Bluetooth, Wi-Fi Direct, Internet transports, and centralized MTU-aware fragmentation are implemented as transport constraint models.
 
 **Real finding:** the original string-keyed CBOR envelope encoding was too large for a realistic BLE MTU even for a 2-character message. Fixed with positional CBOR encoding.
 
@@ -124,8 +124,6 @@ Broadcast size and origin/receiver budgets are bounded, with duplicate suppressi
 
 Route trust carries explicit provenance: destination identity, destination hint, authenticated neighbor identity, and session context. ACK processing preserves the critical distinction: **destination signer proves delivery; authenticated neighbor proves the relay path**. A destination signer is not incorrectly treated as the relay neighbor in a legitimate multi-hop route.
 
-The dedicated C12/C14 integration path verified A → relay → destination forwarding and the return ACK path. The routing-advertisement regression was corrected so a valid destination-signed advertisement can be propagated through an authenticated neighbor while remaining probationary until correlated ACK validation binds the destination signer to that neighbor/session.
-
 ### C13 — Automatic stale-state cleanup — ✅ COMPLETE
 Routing, broadcast, fragment, sync replay, pending-ACK, and related security-sensitive state have bounded lifetime/cleanup behavior.
 
@@ -154,7 +152,7 @@ Concurrency/state-race scenarios from the adversarial campaign have been impleme
 
 ## Security release gate
 
-**C1–C20 are verified.** The latest Codespace regression passed **202 / 202 tests across 40 test files** after adding real node-process communication. C12 and C14 are no longer pending.
+**C1–C20 are verified.** The latest full Codespace regression passed **203 / 203 tests** after C24 verification and the mobile BLE adapter contract tests.
 
 The security release gate is green for the current modeled transports and protocol implementation. Real hardware transport remains a separate implementation track.
 
@@ -170,29 +168,79 @@ Verified A → relay → B → relay → A at the `RelayNode`/Transport boundary
 ### C22 — Real UDP node transport — ✅ COMPLETE
 `src/transport/udp.ts`, `test/c22-real-node-communication.test.ts`
 
-Added a real Node.js UDP transport carrying opaque Zaycomm frames between independent socket endpoints. Verified A → relay → B and the destination-signed ACK return path over actual UDP sockets, plus opaque frame delivery and MTU enforcement. C22 passed in the Codespace and the subsequent full regression remained green.
+Added a real Node.js UDP transport carrying opaque Zaycomm frames between independent socket endpoints. Verified A → relay → B and the destination-signed ACK return path over actual UDP sockets, plus opaque frame delivery and MTU enforcement.
 
 ### C23 — Independent node processes — ✅ COMPLETE
 `src/node/node-process.ts`, `test/c23-independent-node-processes.test.ts`
 
-Zaycomm nodes can now be launched as separate OS processes with their own identities, UDP sockets, peer configuration, lifecycle, and protocol stdin/stdout control channel. Verified Alice → Relay → Bob and Bob → Relay → Alice across separate processes. C23 passed, and the full regression reached **202 / 202**.
+Zaycomm nodes can now be launched as separate OS processes with their own identities, UDP sockets, peer configuration, lifecycle, and protocol stdin/stdout control channel. Verified Alice → Relay → Bob and Bob → Relay → Alice across separate processes.
 
-### C24 — Independent-process encrypted sync — 🟡 IMPLEMENTED — VERIFICATION PENDING
+### C24 — Independent-process encrypted sync — ✅ COMPLETE / VERIFIED
 `src/node/node-process.ts`, `test/c24-independent-node-sync.test.ts`
 
-The runnable node process now exposes an explicit `initiate-sync` control operation and queue status for integration verification. The new C24 test creates directional session keys for two independent node processes, queues an envelope at Alice, initiates encrypted C14 synchronization over real UDP, and verifies the transferred envelope is present in Relay's store-forward queue.
+The runnable node process exposes explicit sync initiation and queue status. The C24 test creates directional session keys for independent node processes, queues an envelope at Alice, initiates encrypted C14 synchronization over real UDP, and verifies the transferred envelope is present in Relay's store-forward queue.
 
-C24 is not complete until the new test passes in the Codespace and the full regression is re-run.
+The test passed and the full regression reached **203 / 203**.
+
+---
+
+# Real Mobile Transport Track — C25
+
+**Architecture decision:** keep the Zaycomm protocol core in TypeScript. Mobile hardware access is a platform adapter behind the existing transport boundary.
+
+```text
+TypeScript Zaycomm core
+        ↓
+mobile-compatible JavaScript runtime
+        ↓
+native bridge
+        ↓
+Android BLE
+```
+
+### C25.1 — Mobile runtime boundary — 🟡 IMPLEMENTED / BUILD VERIFICATION PENDING
+`mobile/package.json`, `mobile/src/transport.ts`
+
+Created the mobile runtime boundary without duplicating protocol logic. Mobile transports expose opaque `Uint8Array` frames and peer/link characteristics; routing, identity, session, crypto, ACK and sync remain above the transport.
+
+### C25.2 — Android-first transport integration — 🟡 IMPLEMENTED / DEVICE VERIFICATION PENDING
+`mobile/src/transport.ts`, `mobile/src/nativeBle.ts`, `mobile/android/app/src/main/AndroidManifest.xml`
+
+Defined the JavaScript ↔ native bridge boundary and Android BLE permissions. The React-Native-specific surface is isolated in `nativeBle.ts` so the TypeScript protocol core remains platform-independent.
+
+### C25.3 — Real Android BLE adapter — 🟡 IMPLEMENTED / ANDROID BUILD VERIFICATION PENDING
+`mobile/android/app/src/main/java/com/zaycomm/mobile/ZaycommBleModule.kt`, `ZaycommBlePackage.kt`, `mobile/src/androidBleTransport.ts`
+
+Implemented the Android BLE central/peripheral GATT bridge: service/characteristic UUIDs, advertisement, scanning, GATT server, connection lifecycle, opaque frame write/receive, notification path, and a 200-byte transport MTU guard. The adapter does not interpret Zaycomm protocol contents.
+
+### C25.4 — Two physical Android devices — 🔵 NOT YET VERIFIED
+
+Acceptance requires two real Android phones to exchange a real Zaycomm encrypted envelope with Internet/cellular data disabled, using the BLE adapter above. This cannot be marked complete from Codespace tests alone.
+
+Required evidence:
+
+1. Install the mobile runtime on Phone A and Phone B.
+2. Grant Bluetooth permissions.
+3. Start a Zaycomm node on each phone with persistent identities.
+4. Discover and authenticate the peer.
+5. Exchange an encrypted Zaycomm message over BLE with Internet disabled.
+6. Receive and validate the delivery ACK.
+7. Repeat in the reverse direction.
+
+**C25.4 remains open until this physical-device test succeeds.**
 
 ---
 
 ## Remaining known gaps / next implementation targets
 
-- **C24 independent-process encrypted sync verification** — run the new production-process sync test.
-- **Real Bluetooth/Wi-Fi Direct adapters** — current Bluetooth/Wi-Fi transports remain constraint models; hardware-specific adapters are not yet implemented.
-- **Long range radio transport (RFC-0008 §4)** — LoRa, HF packet radio, satellite not modeled.
+- **C25.4 physical Android verification** — build/install the mobile runtime and perform the two-phone BLE test.
+- **Mobile persistent node configuration** — durable identity/configuration storage and operational mobile UI remain to be integrated around the core.
+- **Wi-Fi P2P mobile adapter** — real hardware adapter not yet implemented.
+- **Opportunistic Internet transport/gateway on mobile** — real gateway path remains to be integrated after local offline transport works.
+- **Moving-node/store-and-forward field test** — requires physical devices and reconnection/queue orchestration.
+- **Long-range radio transport (RFC-0008 §4)** — LoRa, HF packet radio, satellite are not implemented.
 - **Auto-sync trigger / multi-hop sync routing** — caller-triggered sync and direct-neighbor session synchronization remain deliberate scope boundaries unless promoted by the architecture plan.
-- **Production configuration/discovery** — current node-process configuration is environment/command driven; a durable config format and operational CLI remain future work.
+- **Production configuration/discovery** — current desktop node-process configuration remains environment/command driven.
 
 ---
 
@@ -221,7 +269,8 @@ C24 is not complete until the new test passes in the Codespace and the full regr
 | C15–C20 adversarial campaign | 194 |
 | C12/C14 integration tests | 199 |
 | C22 real UDP node communication | 201 |
-| C23 independent node processes | **202 passed / 202 total** |
+| C23 independent node processes | 202 |
+| C24 encrypted independent-node sync + mobile BLE adapter tests | **203 passed / 203 total** |
 
 ---
 
@@ -234,7 +283,8 @@ C24 is not complete until the new test passes in the Codespace and the full regr
 - Full-file mobile pastes can silently fail to save; verify the file before running tests.
 - C22's UDP transport is Node.js-only and intentionally leaves protocol authentication/encryption above the transport layer.
 - C23/C24 node-process integration is Node.js-only and uses newline-delimited JSON commands on stdin plus newline-delimited JSON events on stdout.
+- The C25 mobile directory is a native-platform integration track; it is not counted as proof of physical-device support until Android build/install and two-phone execution succeed.
 
 ---
 
-*Last updated: C23 verified at 202/202; C24 independent-process encrypted sync implementation added, Codespace verification pending.*
+*Last updated: C24 verified at 203/203; C25.1–C25.3 implementation committed, C25.4 physical-device verification pending.*
