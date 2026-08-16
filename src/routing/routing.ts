@@ -99,7 +99,6 @@ class RoutingTable {
       let candidates = this.routes.get(key);
       if (!candidates) { candidates = new Map(); this.routes.set(key, candidates); }
       const existing = candidates.get(fromNeighborId);
-      // A fresh advertisement never silently upgrades a route. Only a valid ACK can do that.
       candidates.set(fromNeighborId, {
         status: existing?.status === 'validated' && existing.expiresAt > nowMs ? 'validated' : 'probation',
         lastAdvertisedAt: nowMs,
@@ -142,12 +141,10 @@ class RoutingTable {
     this.purgeExpired(nowMs);
     const candidates = this.routes.get(bytesToHex(destinationHint));
     if (!candidates || candidates.size === 0) return null;
-
     let bestValidated: string | null = null;
     let bestValidatedScore = -Infinity;
     let bestProbation: string | null = null;
     let bestProbationScore = -Infinity;
-
     for (const [neighborId, route] of candidates) {
       const score = trustScores.get(neighborId) ?? 0;
       if (route.status === 'validated') {
@@ -230,7 +227,13 @@ export class RelayNode {
         const kind = frame[0];
         const body = frame.slice(1);
         if (kind === FRAME_KIND_FRAGMENT) {
-          const reassembled = this.reassembler.addFragment(body);
+          // C10: fragments are accepted only from an authenticated neighbor.
+          // The session epoch is included in the reassembly ownership key so
+          // a message ID cannot be carried across authenticated sessions.
+          const peer = this.authenticatedPeers.get(fromNeighborId);
+          if (!peer) return;
+          const fragmentPeerId = `${fromNeighborId}:${peer.establishedAt}`;
+          const reassembled = this.reassembler.addFragment(body, fragmentPeerId);
           if (reassembled) this.receiveEnvelope(reassembled, fromNeighborId);
           return;
         }
@@ -374,7 +377,6 @@ export class RelayNode {
     const authenticated = decodeAuthenticatedSync(envelope.sealedPayload);
     if (!authenticated || !this.peerAuthorized(fromNodeId, authenticated.senderPublicKey)) return { outcome: 'dropped', reason: 'invalid sync authentication' };
     const tuple = authenticated.inner;
-
     if (tuple[0] === 0) {
       if (!Array.isArray(tuple[1]) || tuple[1].length > MAX_SYNC_ENTRIES) return { outcome: 'dropped', reason: 'sync summary too large' };
       const entries: SyncSummaryEntry[] = tuple[1].map(([id, ttl]) => [Uint8Array.from(id), ttl]);
@@ -386,7 +388,6 @@ export class RelayNode {
       }
       return { outcome: 'delivered', envelope };
     }
-
     if (tuple[0] === 1) {
       if (!Array.isArray(tuple[1]) || tuple[1].length > MAX_SYNC_REQUESTS) return { outcome: 'dropped', reason: 'sync request too large' };
       const requestedIds = tuple[1].map((id) => Uint8Array.from(id));
@@ -403,7 +404,6 @@ export class RelayNode {
       this.sendEnvelopeOverTransport(fromNodeId, transferEnvelope);
       return { outcome: 'delivered', envelope };
     }
-
     if (!Array.isArray(tuple[1]) || tuple[1].length > MAX_SYNC_TRANSFER_ENVELOPES) return { outcome: 'dropped', reason: 'sync transfer too large' };
     let totalBytes = 0;
     try {
@@ -436,7 +436,6 @@ export class RelayNode {
     if (!validateRoutingHeader(envelope.header)) return { outcome: 'dropped', reason: 'invalid header' };
     if (envelope.header.packetType === PacketType.StoreForwardSync) return this.handleSyncPacket(envelope, fromNodeId);
     if (envelope.header.packetType === PacketType.EmergencyBroadcast) return this.handleBroadcastPacket(envelope, fromNodeId);
-
     if (bytesEqual(envelope.header.destinationHint, this.ownDestinationHint)) {
       if (envelope.header.packetType === PacketType.Ack) {
         const verifiedAck = verifyAckEnvelope(envelope);
@@ -454,7 +453,6 @@ export class RelayNode {
       }
       return { outcome: 'delivered', envelope };
     }
-
     if (envelope.header.ttl <= 0) return { outcome: 'dropped', reason: 'ttl expired' };
     const nextHopId = this.routingTable.lookup(envelope.header.destinationHint, this.neighborTrust);
     if (nextHopId) {
