@@ -1,43 +1,17 @@
 package com.zaycomm.mobile
 
 import android.Manifest
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothGatt
-import android.bluetooth.BluetoothGattCallback
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
-import android.bluetooth.BluetoothGattServer
-import android.bluetooth.BluetoothGattServerCallback
-import android.bluetooth.BluetoothGattService
-import android.bluetooth.BluetoothManager
-import android.bluetooth.le.AdvertiseCallback
-import android.bluetooth.le.AdvertiseData
-import android.bluetooth.le.AdvertiseSettings
-import android.bluetooth.le.BluetoothLeAdvertiser
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
-import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
+import android.bluetooth.*
+import android.bluetooth.le.*
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.ParcelUuid
-import androidx.annotation.RequiresPermission
-import com.facebook.react.bridge.Arguments
-import com.facebook.react.bridge.Promise
-import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.bridge.ReactContextBaseJavaModule
-import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.util.UUID
 
-/**
- * Native Android BLE bridge for Zaycomm.
- *
- * The bridge only moves opaque byte frames. Zaycomm identity, routing,
- * sessions, encryption, replay protection and ACK semantics remain in the
- * TypeScript core above this layer.
- */
+/** Native BLE bridge. It transports opaque Zaycomm bytes only. */
 class ZaycommBleModule(private val context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
     companion object {
         private const val MODULE = "ZaycommBle"
@@ -48,149 +22,151 @@ class ZaycommBleModule(private val context: ReactApplicationContext) : ReactCont
 
     private val serviceUuid = UUID.fromString(SERVICE)
     private val frameUuid = UUID.fromString(FRAME)
-    private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-    private val adapter: BluetoothAdapter? get() = bluetoothManager.adapter
-    private var scannerCallback: ScanCallback? = null
+    private val cccdUuid = UUID.fromString(CCCD)
+    private val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    private val adapter: BluetoothAdapter? get() = manager.adapter
+    private var scanCallback: ScanCallback? = null
     private var advertiser: BluetoothLeAdvertiser? = null
     private var server: BluetoothGattServer? = null
-    private val connections = mutableMapOf<String, BluetoothGatt>()
+    private var frameCharacteristic: BluetoothGattCharacteristic? = null
+    private val gattConnections = mutableMapOf<String, BluetoothGatt>()
+    private val serverClients = mutableMapOf<String, BluetoothDevice>()
 
-    override fun getName(): String = MODULE
+    override fun getName() = MODULE
 
-    private fun emit(name: String, params: com.facebook.react.bridge.WritableMap) {
-        context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java).emit(name, params)
-    }
-
-    private fun has(permission: String): Boolean = context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+    private fun allowed(permission: String) = Build.VERSION.SDK_INT < 31 || context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+    private fun emit(name: String, params: WritableMap) = context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java).emit(name, params)
 
     @ReactMethod
     fun startScan() {
         val bt = adapter ?: return
-        if (!bt.isEnabled) return
-        if (android.os.Build.VERSION.SDK_INT >= 31 && !has(Manifest.permission.BLUETOOTH_SCAN)) return
+        if (!bt.isEnabled || !allowed(Manifest.permission.BLUETOOTH_SCAN)) return
         val scanner = bt.bluetoothLeScanner ?: return
-        scannerCallback?.let { scanner.stopScan(it) }
+        scanCallback?.let { scanner.stopScan(it) }
         val callback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val serviceData = result.scanRecord?.getServiceData(ParcelUuid(serviceUuid)) ?: return
-                val id = serviceData.toString(Charsets.UTF_8)
-                val map = Arguments.createMap()
-                map.putString("id", id)
-                map.putString("address", result.device.address)
-                emit("ZaycommBleAdvertisement", map)
+            override fun onScanResult(type: Int, result: ScanResult) {
+                val data = result.scanRecord?.getServiceData(ParcelUuid(serviceUuid)) ?: return
+                emit("ZaycommBleAdvertisement", Arguments.createMap().apply {
+                    putString("id", data.toString(Charsets.UTF_8)); putString("address", result.device.address)
+                })
             }
         }
-        scannerCallback = callback
-        val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(serviceUuid)).build()
-        scanner.startScan(listOf(filter), ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), callback)
+        scanCallback = callback
+        scanner.startScan(
+            listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(serviceUuid)).build()),
+            ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), callback
+        )
     }
 
-    @ReactMethod
-    fun stopScan() {
-        if (android.os.Build.VERSION.SDK_INT >= 31 && !has(Manifest.permission.BLUETOOTH_SCAN)) return
-        val callback = scannerCallback ?: return
-        adapter?.bluetoothLeScanner?.stopScan(callback)
-        scannerCallback = null
+    @ReactMethod fun stopScan() {
+        if (!allowed(Manifest.permission.BLUETOOTH_SCAN)) return
+        scanCallback?.let { adapter?.bluetoothLeScanner?.stopScan(it) }
+        scanCallback = null
     }
 
     @ReactMethod
     fun startAdvertising(nodeId: String, promise: Promise) {
         val bt = adapter
-        if (bt == null || !bt.isEnabled) {
-            promise.reject("BLE_UNAVAILABLE", "Bluetooth LE is unavailable or disabled")
-            return
-        }
-        if (android.os.Build.VERSION.SDK_INT >= 31 && !has(Manifest.permission.BLUETOOTH_ADVERTISE)) {
-            promise.reject("BLE_PERMISSION", "BLUETOOTH_ADVERTISE permission is required")
-            return
-        }
+        if (bt == null || !bt.isEnabled) { promise.reject("BLE_UNAVAILABLE", "Bluetooth LE unavailable or disabled"); return }
+        if (!allowed(Manifest.permission.BLUETOOTH_ADVERTISE) || !allowed(Manifest.permission.BLUETOOTH_CONNECT)) { promise.reject("BLE_PERMISSION", "Bluetooth permissions are required"); return }
+        val service = BluetoothGattService(serviceUuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+        val characteristic = BluetoothGattCharacteristic(
+            frameUuid,
+            BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+            BluetoothGattCharacteristic.PERMISSION_WRITE
+        )
+        characteristic.addDescriptor(BluetoothGattDescriptor(cccdUuid, BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE))
+        service.addCharacteristic(characteristic)
+        frameCharacteristic = characteristic
+        server?.close()
+        server = manager.openGattServer(context, object : BluetoothGattServerCallback() {
+            override fun onConnectionStateChange(device: BluetoothDevice, status: Int, state: Int) {
+                val connected = state == BluetoothProfile.STATE_CONNECTED
+                if (connected) serverClients[device.address] = device else serverClients.remove(device.address)
+                emit("ZaycommBleConnectionChanged", Arguments.createMap().apply { putString("address", device.address); putBoolean("connected", connected) })
+            }
+            override fun onDescriptorWriteRequest(device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor, preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray) {
+                if (descriptor.uuid == cccdUuid && responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            }
+            override fun onCharacteristicWriteRequest(device: BluetoothDevice, requestId: Int, characteristic: BluetoothGattCharacteristic, preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray) {
+                if (characteristic.uuid != frameUuid) return
+                emit("ZaycommBleFrame", Arguments.createMap().apply {
+                    putString("address", device.address)
+                    putArray("frame", Arguments.fromList(value.map { it.toInt() }))
+                })
+                if (responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            }
+        })
+        if (server == null) { promise.reject("BLE_GATT_SERVER", "Unable to open GATT server"); return }
+        if (!server!!.addService(service)) { promise.reject("BLE_GATT_SERVICE", "Unable to register Zaycomm BLE service"); return }
+
         advertiser = bt.bluetoothLeAdvertiser
         val settings = AdvertiseSettings.Builder().setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY).setConnectable(true).setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH).build()
         val data = AdvertiseData.Builder().setIncludeDeviceName(false).addServiceUuid(ParcelUuid(serviceUuid)).addServiceData(ParcelUuid(serviceUuid), nodeId.toByteArray(Charsets.UTF_8)).build()
         advertiser?.startAdvertising(settings, data, object : AdvertiseCallback() {
-            override fun onStartSuccess(settingsInEffect: AdvertiseSettings) { promise.resolve(null) }
-            override fun onStartFailure(errorCode: Int) { promise.reject("BLE_ADVERTISE", "BLE advertising failed: $errorCode") }
+            override fun onStartSuccess(settingsInEffect: AdvertiseSettings) = promise.resolve(null)
+            override fun onStartFailure(errorCode: Int) = promise.reject("BLE_ADVERTISE", "BLE advertising failed: $errorCode")
         }) ?: promise.reject("BLE_UNAVAILABLE", "BLE advertiser unavailable")
     }
 
-    @ReactMethod
-    fun stopAdvertising() {
-        if (android.os.Build.VERSION.SDK_INT >= 31 && !has(Manifest.permission.BLUETOOTH_ADVERTISE)) return
-        advertiser?.stopAdvertising(object : AdvertiseCallback() {})
-        advertiser = null
+    @ReactMethod fun stopAdvertising() {
+        if (allowed(Manifest.permission.BLUETOOTH_ADVERTISE)) advertiser?.stopAdvertising(object : AdvertiseCallback() {})
+        advertiser = null; server?.close(); server = null; serverClients.clear()
     }
 
     @ReactMethod
     fun connect(address: String, promise: Promise) {
-        val bt = adapter
-        if (bt == null) { promise.reject("BLE_UNAVAILABLE", "Bluetooth adapter unavailable"); return }
-        if (android.os.Build.VERSION.SDK_INT >= 31 && !has(Manifest.permission.BLUETOOTH_CONNECT)) {
-            promise.reject("BLE_PERMISSION", "BLUETOOTH_CONNECT permission is required")
-            return
-        }
-        val device = try { bt.getRemoteDevice(address) } catch (e: IllegalArgumentException) {
-            promise.reject("BLE_ADDRESS", "Invalid Bluetooth address", e); return
-        }
+        val bt = adapter ?: run { promise.reject("BLE_UNAVAILABLE", "Bluetooth adapter unavailable"); return }
+        if (!allowed(Manifest.permission.BLUETOOTH_CONNECT)) { promise.reject("BLE_PERMISSION", "BLUETOOTH_CONNECT permission required"); return }
+        val device = try { bt.getRemoteDevice(address) } catch (e: IllegalArgumentException) { promise.reject("BLE_ADDRESS", "Invalid Bluetooth address", e); return }
         val gatt = device.connectGatt(context, false, object : BluetoothGattCallback() {
-            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-                val map = Arguments.createMap().apply { putString("address", address); putBoolean("connected", newState == BluetoothGatt.STATE_CONNECTED) }
-                if (newState == BluetoothGatt.STATE_CONNECTED) {
-                    connections[address] = gatt
-                    gatt.discoverServices()
-                } else {
-                    connections.remove(address)
-                    gatt.close()
-                }
-                emit("ZaycommBleConnectionChanged", map)
+            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, state: Int) {
+                val connected = state == BluetoothProfile.STATE_CONNECTED
+                if (connected) { gattConnections[address] = gatt; gatt.discoverServices() } else { gattConnections.remove(address); gatt.close() }
+                emit("ZaycommBleConnectionChanged", Arguments.createMap().apply { putString("address", address); putBoolean("connected", connected) })
             }
             override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
                 if (status == BluetoothGatt.GATT_SUCCESS) promise.resolve(null) else promise.reject("BLE_GATT", "Service discovery failed: $status")
             }
             override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
                 if (characteristic.uuid != frameUuid) return
-                val map = Arguments.createMap().apply {
-                    putString("address", address)
-                    putArray("frame", Arguments.fromList(characteristic.value.map { it.toInt() }))
-                }
-                emit("ZaycommBleFrame", map)
+                emit("ZaycommBleFrame", Arguments.createMap().apply { putString("address", address); putArray("frame", Arguments.fromList(characteristic.value.map { it.toInt() })) })
             }
         })
         if (gatt == null) promise.reject("BLE_CONNECT", "Unable to create GATT connection")
     }
 
-    @ReactMethod
-    fun disconnect(address: String, promise: Promise) {
-        if (android.os.Build.VERSION.SDK_INT >= 31 && !has(Manifest.permission.BLUETOOTH_CONNECT)) { promise.reject("BLE_PERMISSION", "BLUETOOTH_CONNECT permission is required"); return }
-        connections.remove(address)?.let { it.disconnect(); it.close() }
-        promise.resolve(null)
+    @ReactMethod fun disconnect(address: String, promise: Promise) {
+        if (!allowed(Manifest.permission.BLUETOOTH_CONNECT)) { promise.reject("BLE_PERMISSION", "BLUETOOTH_CONNECT permission required"); return }
+        gattConnections.remove(address)?.let { it.disconnect(); it.close() }; promise.resolve(null)
     }
 
     @ReactMethod
-    fun write(address: String, frame: com.facebook.react.bridge.ReadableArray, promise: Promise) {
-        val gatt = connections[address]
-        if (gatt == null) { promise.reject("BLE_NOT_CONNECTED", "No connected BLE peer: $address"); return }
+    fun write(address: String, frame: ReadableArray, promise: Promise) {
         if (frame.size() > 200) { promise.reject("BLE_MTU", "Frame exceeds C25 BLE transport MTU"); return }
-        val service = gatt.getService(serviceUuid)
-        val characteristic = service?.getCharacteristic(frameUuid)
-        if (characteristic == null) { promise.reject("BLE_SERVICE", "Zaycomm BLE frame characteristic not found"); return }
-        val bytes = ByteArray(frame.size()) { frame.getInt(it).toByte() }
-        characteristic.value = bytes
-        val ok = gatt.writeCharacteristic(characteristic)
-        if (ok) promise.resolve(null) else promise.reject("BLE_WRITE", "GATT write could not be queued")
+        if (!allowed(Manifest.permission.BLUETOOTH_CONNECT)) { promise.reject("BLE_PERMISSION", "BLUETOOTH_CONNECT permission required"); return }
+        val gatt = gattConnections[address] ?: run { promise.reject("BLE_NOT_CONNECTED", "No connected BLE peer: $address"); return }
+        val characteristic = gatt.getService(serviceUuid)?.getCharacteristic(frameUuid) ?: run { promise.reject("BLE_SERVICE", "Zaycomm frame characteristic not found"); return }
+        characteristic.value = ByteArray(frame.size()) { frame.getInt(it).toByte() }
+        if (gatt.writeCharacteristic(characteristic)) promise.resolve(null) else promise.reject("BLE_WRITE", "GATT write could not be queued")
     }
 
+    /** Server-side notification path for bidirectional frame delivery. */
     @ReactMethod
-    fun addListener(eventName: String) { }
+    fun notify(address: String, frame: ReadableArray, promise: Promise) {
+        if (!allowed(Manifest.permission.BLUETOOTH_CONNECT)) { promise.reject("BLE_PERMISSION", "BLUETOOTH_CONNECT permission required"); return }
+        if (frame.size() > 200) { promise.reject("BLE_MTU", "Frame exceeds C25 BLE transport MTU"); return }
+        val device = serverClients[address] ?: run { promise.reject("BLE_NOT_CONNECTED", "No server-side BLE peer: $address"); return }
+        val characteristic = frameCharacteristic ?: run { promise.reject("BLE_SERVICE", "Zaycomm frame characteristic unavailable"); return }
+        characteristic.value = ByteArray(frame.size()) { frame.getInt(it).toByte() }
+        if (server?.notifyCharacteristicChanged(device, characteristic, false) == true) promise.resolve(null)
+        else promise.reject("BLE_NOTIFY", "GATT notification could not be queued")
+    }
 
-    @ReactMethod
-    fun removeListeners(count: Int) { }
+    @ReactMethod fun addListener(eventName: String) {}
+    @ReactMethod fun removeListeners(count: Int) {}
 
     override fun onCatalystInstanceDestroy() {
-        stopScan()
-        connections.values.forEach { it.close() }
-        connections.clear()
-        server?.close()
-        server = null
-        super.onCatalystInstanceDestroy()
+        stopScan(); stopAdvertising(); gattConnections.values.forEach { it.close() }; gattConnections.clear(); super.onCatalystInstanceDestroy()
     }
 }
