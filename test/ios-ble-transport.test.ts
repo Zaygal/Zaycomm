@@ -15,6 +15,7 @@ function createBridge() {
     connect: async (peerId) => { connects.push(peerId); },
     disconnect: async (peerId) => { disconnects.push(peerId); },
     write: async (peerId, value) => writes.push({ peerId, frame: Uint8Array.from(value) }),
+    getMaximumWriteLength: () => 182,
     onAdvertisement: (cb) => { advertisement = cb; },
     onFrame: (cb) => { frame = cb; },
     onConnectionChanged: (cb) => { connection = cb; },
@@ -56,13 +57,22 @@ describe('C25 iOS BLE transport', () => {
     expect(fake.disconnects).toEqual(['ios-peer-bob']);
   });
 
-  it('rejects frames larger than the configured BLE MTU', async () => {
+  it('uses the native CoreBluetooth write capacity', () => {
     const fake = createBridge();
     const transport = new IosBleTransport(fake.bridge);
-    fake.advertise({ id: 'bob', address: 'ios-peer-bob' });
-    fake.setConnected('bob', true);
+    fake.advertise({ id: 'ios-peer-bob', address: 'ios-peer-bob' });
 
-    await expect(transport.send('bob', new Uint8Array(201))).rejects.toThrow('BLE frame exceeds transport MTU');
+    expect(transport.getLinkCharacteristics('ios-peer-bob')?.maxTransmissionUnit).toBe(182);
+  });
+
+  it('rejects frames above the current physical write capacity before native I/O', async () => {
+    const fake = createBridge();
+    const transport = new IosBleTransport(fake.bridge);
+    fake.advertise({ id: 'ios-peer-bob', address: 'ios-peer-bob' });
+    fake.setConnected('ios-peer-bob', true);
+
+    await expect(transport.send('ios-peer-bob', new Uint8Array(183))).rejects.toThrow('BLE frame exceeds transport MTU');
+    expect(fake.writes).toHaveLength(0);
   });
 
   it('does not send to a peer that is not connected', async () => {
