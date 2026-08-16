@@ -45,9 +45,12 @@ class ZaycommBleModule(private val context: ReactApplicationContext) : ReactCont
         scanCallback?.let { scanner.stopScan(it) }
         val callback = object : ScanCallback() {
             override fun onScanResult(type: Int, result: ScanResult) {
-                val data = result.scanRecord?.getServiceData(ParcelUuid(serviceUuid)) ?: return
+                val record = result.scanRecord ?: return
+                val advertisesZaycomm = record.serviceUuids?.any { it.uuid == serviceUuid } == true
+                if (!advertisesZaycomm) return
                 emit("ZaycommBleAdvertisement", Arguments.createMap().apply {
-                    putString("id", data.toString(Charsets.UTF_8)); putString("address", result.device.address)
+                    putString("id", result.device.address)
+                    putString("address", result.device.address)
                 })
             }
         }
@@ -89,7 +92,7 @@ class ZaycommBleModule(private val context: ReactApplicationContext) : ReactCont
                 if (descriptor.uuid == cccdUuid && responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             }
             override fun onCharacteristicWriteRequest(device: BluetoothDevice, requestId: Int, characteristic: BluetoothGattCharacteristic, preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray) {
-                if (characteristic.uuid != frameUuid) return
+                if (characteristic.uuid != frameUuid || value.size > 200) return
                 emit("ZaycommBleFrame", Arguments.createMap().apply {
                     putString("address", device.address)
                     putArray("frame", Arguments.fromList(value.map { it.toInt() }))
@@ -102,7 +105,10 @@ class ZaycommBleModule(private val context: ReactApplicationContext) : ReactCont
 
         advertiser = bt.bluetoothLeAdvertiser
         val settings = AdvertiseSettings.Builder().setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY).setConnectable(true).setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH).build()
-        val data = AdvertiseData.Builder().setIncludeDeviceName(false).addServiceUuid(ParcelUuid(serviceUuid)).addServiceData(ParcelUuid(serviceUuid), nodeId.toByteArray(Charsets.UTF_8)).build()
+        // Keep advertisements interoperable with iOS CoreBluetooth: only the
+        // public service is advertised. Node identity is authenticated later.
+        val data = AdvertiseData.Builder().setIncludeDeviceName(false).addServiceUuid(ParcelUuid(serviceUuid)).build()
+        _ = nodeId
         advertiser?.startAdvertising(settings, data, object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings) = promise.resolve(null)
             override fun onStartFailure(errorCode: Int) = promise.reject("BLE_ADVERTISE", "BLE advertising failed: $errorCode")
@@ -143,7 +149,7 @@ class ZaycommBleModule(private val context: ReactApplicationContext) : ReactCont
 
     @ReactMethod
     fun write(address: String, frame: ReadableArray, promise: Promise) {
-        if (frame.size() > 200) { promise.reject("BLE_MTU", "Frame exceeds C25 BLE transport MTU"); return }
+        if (frame.size() > 200) { promise.reject("BLE_MTU", "Frame exceeds the configured mobile BLE transport MTU"); return }
         if (!allowed(Manifest.permission.BLUETOOTH_CONNECT)) { promise.reject("BLE_PERMISSION", "BLUETOOTH_CONNECT permission required"); return }
         val gatt = gattConnections[address] ?: run { promise.reject("BLE_NOT_CONNECTED", "No connected BLE peer: $address"); return }
         val characteristic = gatt.getService(serviceUuid)?.getCharacteristic(frameUuid) ?: run { promise.reject("BLE_SERVICE", "Zaycomm frame characteristic not found"); return }
@@ -151,11 +157,10 @@ class ZaycommBleModule(private val context: ReactApplicationContext) : ReactCont
         if (gatt.writeCharacteristic(characteristic)) promise.resolve(null) else promise.reject("BLE_WRITE", "GATT write could not be queued")
     }
 
-    /** Server-side notification path for bidirectional frame delivery. */
     @ReactMethod
     fun notify(address: String, frame: ReadableArray, promise: Promise) {
         if (!allowed(Manifest.permission.BLUETOOTH_CONNECT)) { promise.reject("BLE_PERMISSION", "BLUETOOTH_CONNECT permission required"); return }
-        if (frame.size() > 200) { promise.reject("BLE_MTU", "Frame exceeds C25 BLE transport MTU"); return }
+        if (frame.size() > 200) { promise.reject("BLE_MTU", "Frame exceeds the configured mobile BLE transport MTU"); return }
         val device = serverClients[address] ?: run { promise.reject("BLE_NOT_CONNECTED", "No server-side BLE peer: $address"); return }
         val characteristic = frameCharacteristic ?: run { promise.reject("BLE_SERVICE", "Zaycomm frame characteristic unavailable"); return }
         characteristic.value = ByteArray(frame.size()) { frame.getInt(it).toByte() }
