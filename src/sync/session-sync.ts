@@ -1,13 +1,17 @@
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
-import { randomBytes } from '@noble/ciphers/webcrypto.js';
-import { buildNonce } from '../util';
-
-const INFO = new TextEncoder().encode('Zaycomm C14 sync v1');
 
 export interface SyncCiphertext {
   sessionId: string;
   nonce: Uint8Array;
   ciphertext: Uint8Array;
+}
+
+function randomNonce(): Uint8Array {
+  const nonce = new Uint8Array(24);
+  const cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.getRandomValues) throw new Error('SECURE_RANDOM_UNAVAILABLE');
+  cryptoApi.getRandomValues(nonce);
+  return nonce;
 }
 
 /**
@@ -22,7 +26,7 @@ export function encryptSyncPayload(
   plaintext: Uint8Array
 ): SyncCiphertext {
   if (sessionKey.length !== 32) throw new Error('INVALID_SESSION_KEY');
-  const nonce = randomBytes(24);
+  const nonce = randomNonce();
   const aad = new TextEncoder().encode(`${sessionId}:c14`);
   const cipher = xchacha20poly1305(sessionKey, nonce, aad);
   return { sessionId, nonce, ciphertext: cipher.encrypt(plaintext) };
