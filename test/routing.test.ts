@@ -22,9 +22,6 @@ import { createBluetoothTransport, type SimulatedTransport } from '../src/transp
 const text = (s: string) => new TextEncoder().encode(s);
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
 
-/** Test-only helper: connects two nodes' underlying transports.
- * RelayNode itself has no business knowing about connection setup,
- * that is entirely a transport-layer concern (RFC-0008). */
 function connectNodes(a: RelayNode, b: RelayNode): void {
   (a.transport as SimulatedTransport).connectPeer(b.transport as SimulatedTransport);
 }
@@ -42,7 +39,6 @@ describe('Routing advertisements (RFC-0007 Section 5)', () => {
     const impostor = createIdentity();
     const hint = computeDestinationHint(identity.publicKey);
     const ad = createRoutingAdvertisement(identity, [hint]);
-
     const forged = { ...ad, advertiserPublicKey: impostor.publicKey };
     expect(verifyRoutingAdvertisement(forged)).toBe(false);
   });
@@ -56,6 +52,8 @@ describe('Multi-hop forwarding over a real Transport (RFC-0007 Section 4, RFC-00
 
     connectNodes(alice, relay);
     connectNodes(relay, bob);
+    relay.registerAuthenticatedPeer('bob', bob.identity.publicKey);
+    alice.registerAuthenticatedPeer('relay', relay.identity.publicKey);
 
     const bobAd = createRoutingAdvertisement(bob.identity, [computeDestinationHint(bob.identity.publicKey)]);
     relay.receiveAdvertisement('bob', bobAd);
@@ -65,49 +63,25 @@ describe('Multi-hop forwarding over a real Transport (RFC-0007 Section 4, RFC-00
   }
 
   it('delivers a message across two hops, observed at the destination via onDelivered', () => {
-    const { alice, relay, bob } = buildThreeNodeMesh();
-
-    let delivered: ReturnType<typeof bob.onDelivered> extends void ? Uint8Array | null : never;
+    const { alice, bob } = buildThreeNodeMesh();
     let deliveredEnvelope: Awaited<ReturnType<typeof openDataEnvelope>> | null = null;
-    bob.onDelivered((envelope) => {
-      deliveredEnvelope = openDataEnvelope(envelope) as any;
-    });
+    bob.onDelivered((envelope) => { deliveredEnvelope = openDataEnvelope(envelope) as any; });
 
     const destinationHint = computeDestinationHint(bob.identity.publicKey);
-    const envelope = createDataEnvelope(
-      destinationHint,
-      { dhPublicKey: new Uint8Array(32), previousChainLength: 0, messageNumber: 0 },
-      text('secret for bob'),
-      10
-    );
-
+    const envelope = createDataEnvelope(destinationHint, { dhPublicKey: new Uint8Array(32), previousChainLength: 0, messageNumber: 0 }, text('secret for bob'), 10);
     const result = alice.receiveEnvelope(envelope, null);
-
-    // The sender only ever sees its own immediate outcome now, not
-    // the full downstream path, that visibility genuinely does not
-    // exist once a real Transport boundary sits between hops.
     expect(result.outcome).toBe('forwarded');
     expect(deliveredEnvelope).not.toBeNull();
   });
 
   it('drops the message when TTL is too low to reach the destination', () => {
-    const { alice, relay, bob } = buildThreeNodeMesh();
-
+    const { alice, bob } = buildThreeNodeMesh();
     let bobReceivedAnything = false;
-    bob.onDelivered(() => {
-      bobReceivedAnything = true;
-    });
-
+    bob.onDelivered(() => { bobReceivedAnything = true; });
     const destinationHint = computeDestinationHint(bob.identity.publicKey);
-    const envelope = createDataEnvelope(
-      destinationHint,
-      { dhPublicKey: new Uint8Array(32), previousChainLength: 0, messageNumber: 0 },
-      text('too far'),
-      1 // only enough for one hop, alice -> relay, then relay can't forward further
-    );
-
+    const envelope = createDataEnvelope(destinationHint, { dhPublicKey: new Uint8Array(32), previousChainLength: 0, messageNumber: 0 }, text('too far'), 1);
     const result = alice.receiveEnvelope(envelope, null);
-    expect(result.outcome).toBe('forwarded'); // alice's own send succeeded, relay is the one that will drop it
+    expect(result.outcome).toBe('forwarded');
     expect(bobReceivedAnything).toBe(false);
   });
 
@@ -117,20 +91,13 @@ describe('Multi-hop forwarding over a real Transport (RFC-0007 Section 4, RFC-00
     const bob = new RelayNode('bob', createIdentity(), createBluetoothTransport('bob'));
     connectNodes(alice, relay);
     connectNodes(relay, bob);
+    relay.registerAuthenticatedPeer('bob', bob.identity.publicKey);
+    alice.registerAuthenticatedPeer('relay', relay.identity.publicKey);
 
     let delivered = false;
-    bob.onDelivered(() => {
-      delivered = true;
-    });
-
+    bob.onDelivered(() => { delivered = true; });
     const bobHint = computeDestinationHint(bob.identity.publicKey);
-    const envelope = createDataEnvelope(
-      bobHint,
-      { dhPublicKey: new Uint8Array(32), previousChainLength: 0, messageNumber: 0 },
-      text('waiting for a path'),
-      10
-    );
-
+    const envelope = createDataEnvelope(bobHint, { dhPublicKey: new Uint8Array(32), previousChainLength: 0, messageNumber: 0 }, text('waiting for a path'), 10);
     const firstAttempt = alice.receiveEnvelope(envelope, null);
     expect(firstAttempt.outcome).toBe('queued');
     expect(alice.queueSize()).toBe(1);
@@ -139,7 +106,6 @@ describe('Multi-hop forwarding over a real Transport (RFC-0007 Section 4, RFC-00
     const bobAd = createRoutingAdvertisement(bob.identity, [bobHint]);
     relay.receiveAdvertisement('bob', bobAd);
     alice.receiveAdvertisement('relay', bobAd);
-
     expect(alice.queueSize()).toBe(0);
     expect(delivered).toBe(true);
   });
@@ -149,11 +115,11 @@ describe('Multi-hop forwarding over a real Transport (RFC-0007 Section 4, RFC-00
     const relay = new RelayNode('relay', createIdentity(), createBluetoothTransport('relay'));
     const bob = createIdentity();
     connectNodes(alice, relay);
+    alice.registerAuthenticatedPeer('relay', relay.identity.publicKey);
 
     const bobHint = computeDestinationHint(bob.publicKey);
     const legitimateAd = createRoutingAdvertisement(bob, [bobHint]);
     const forgedAd = { ...legitimateAd, advertiserPublicKey: createIdentity().publicKey };
-
     alice.receiveAdvertisement('relay', forgedAd);
     expect(alice.hasRoute(bobHint)).toBe(false);
   });
@@ -164,12 +130,9 @@ describe('Multi-hop forwarding over a real Transport (RFC-0007 Section 4, RFC-00
     const aliceIdentity = createIdentity();
     const bobIdentity = createIdentity();
 
-    const { message: msg1, state: aliceHandshakeState, initiatorEphemeral } =
-      initiatorWriteMessage1(aliceStatic, bobStatic.publicKey);
-    const { state: bobHandshakeState, initiatorStaticPublicKey } =
-      responderReadMessage1(bobStatic, msg1);
-    const { message: msg2, result: bobHandshakeResult, initialRatchetKeyPair } =
-      responderWriteMessage2(bobHandshakeState, msg1.ephemeralPublicKey, initiatorStaticPublicKey);
+    const { message: msg1, state: aliceHandshakeState, initiatorEphemeral } = initiatorWriteMessage1(aliceStatic, bobStatic.publicKey);
+    const { state: bobHandshakeState, initiatorStaticPublicKey } = responderReadMessage1(bobStatic, msg1);
+    const { message: msg2, result: bobHandshakeResult, initialRatchetKeyPair } = responderWriteMessage2(bobHandshakeState, msg1.ephemeralPublicKey, initiatorStaticPublicKey);
     const aliceHandshakeResult = initiatorReadMessage2(aliceHandshakeState, aliceStatic, initiatorEphemeral, msg2);
 
     const aliceRatchet = DoubleRatchet.initAsInitiator(aliceHandshakeResult.rootKey, msg2.ephemeralPublicKey);
@@ -180,6 +143,8 @@ describe('Multi-hop forwarding over a real Transport (RFC-0007 Section 4, RFC-00
     const bobNode = new RelayNode('bob', bobIdentity, createBluetoothTransport('bob'));
     connectNodes(aliceNode, relayNode);
     connectNodes(relayNode, bobNode);
+    relayNode.registerAuthenticatedPeer('bob', bobIdentity.publicKey);
+    aliceNode.registerAuthenticatedPeer('relay', relayNode.identity.publicKey);
 
     const bobDestinationHint = computeDestinationHint(bobIdentity.publicKey);
     const bobAd = createRoutingAdvertisement(bobIdentity, [bobDestinationHint]);
@@ -194,7 +159,6 @@ describe('Multi-hop forwarding over a real Transport (RFC-0007 Section 4, RFC-00
 
     const { header: ratchetHeader, ciphertext } = aliceRatchet.encrypt(text('routed and encrypted'));
     const envelope = createDataEnvelope(bobDestinationHint, ratchetHeader, ciphertext, 10);
-
     const result = aliceNode.receiveEnvelope(envelope, null);
     expect(result.outcome).toBe('forwarded');
     expect(receivedPlaintext).toBe('routed and encrypted');
