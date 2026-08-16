@@ -18,6 +18,9 @@ export interface IosBleBridge {
 /**
  * iOS CoreBluetooth adapter. The transport boundary carries opaque Zaycomm
  * frames; protocol semantics remain in the TypeScript core.
+ *
+ * `MobilePeer.id` is the platform transport handle. On iOS this is the
+ * CoreBluetooth UUID supplied by the OS, not a protocol identity.
  */
 export class IosBleTransport implements MobileTransport {
   readonly name = 'bluetooth-le-ios';
@@ -29,12 +32,12 @@ export class IosBleTransport implements MobileTransport {
   constructor(private readonly bridge: IosBleBridge) {
     bridge.onAdvertisement((peer) => this.peers.set(peer.id, peer));
     bridge.onFrame((peerId, frame) => this.receiveCallback?.(peerId, frame));
-    bridge.onConnectionChanged((peerId, connected) => {
+    bridge.onConnectionChanged((peerId, isConnected) => {
       const peer = this.peers.get(peerId);
       if (!peer) return;
-      if (connected) this.connected.add(peerId);
+      if (isConnected) this.connected.add(peerId);
       else this.connected.delete(peerId);
-      this.peerCallback?.(peer, connected);
+      this.peerCallback?.(peer, isConnected);
     });
   }
 
@@ -51,23 +54,26 @@ export class IosBleTransport implements MobileTransport {
   }
 
   async connect(peer: MobilePeer): Promise<void> {
-    await this.bridge.connect(peer.id);
+    await this.bridge.connect(peer.address);
   }
 
   async disconnect(peerId: string): Promise<void> {
-    if (!this.peers.has(peerId)) return;
-    await this.bridge.disconnect(peerId);
+    const peer = this.peers.get(peerId);
+    if (!peer) return;
+    await this.bridge.disconnect(peer.address);
+    this.connected.delete(peerId);
   }
 
   async send(peerId: string, frame: Uint8Array): Promise<void> {
-    if (!this.connected.has(peerId)) {
+    const peer = this.peers.get(peerId);
+    if (!peer || !this.connected.has(peerId)) {
       throw new Error(`BLE peer is not connected: ${peerId}`);
     }
     const mtu = this.getLinkCharacteristics(peerId)?.maxTransmissionUnit ?? 200;
     if (frame.byteLength > mtu) {
       throw new Error(`BLE frame exceeds transport MTU: ${frame.byteLength} > ${mtu}`);
     }
-    await this.bridge.write(peerId, frame);
+    await this.bridge.write(peer.address, frame);
   }
 
   onReceive(callback: (peerId: string, frame: Uint8Array) => void): void {
