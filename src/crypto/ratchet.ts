@@ -75,7 +75,9 @@ function snapshotState(state: RatchetState): RatchetState {
 }
 
 export class DoubleRatchet {
-  private rootKey: Uint8Array;
+  // ECMAScript private storage prevents reflective access such as
+  // (ratchet as any).rootKey. Callers can only use protocol operations.
+  #rootKey: Uint8Array;
   private dhSelf: X25519KeyPair;
   private dhRemote: Uint8Array | null;
   private sendingChainKey: Uint8Array | null;
@@ -92,7 +94,7 @@ export class DoubleRatchet {
     sendingChainKey: Uint8Array | null,
     receivingChainKey: Uint8Array | null
   ) {
-    this.rootKey = rootKey;
+    this.#rootKey = new Uint8Array(rootKey);
     this.dhSelf = dhSelf;
     this.dhRemote = dhRemote;
     this.sendingChainKey = sendingChainKey;
@@ -112,7 +114,7 @@ export class DoubleRatchet {
 
   private getState(): RatchetState {
     return {
-      rootKey: this.rootKey,
+      rootKey: this.#rootKey,
       dhSelf: this.dhSelf,
       dhRemote: this.dhRemote,
       sendingChainKey: this.sendingChainKey,
@@ -125,7 +127,7 @@ export class DoubleRatchet {
   }
 
   private restoreState(state: RatchetState): void {
-    this.rootKey = state.rootKey;
+    this.#rootKey = state.rootKey;
     this.dhSelf = state.dhSelf;
     this.dhRemote = state.dhRemote;
     this.sendingChainKey = state.sendingChainKey;
@@ -140,17 +142,12 @@ export class DoubleRatchet {
     return `${bytesToHex(dhPublicKey)}:${messageNumber}`;
   }
 
-  /** Looks for a cached key without consuming it. It is removed only
-   * after the ciphertext authenticates successfully. */
   private getSkippedMessageKey(header: RatchetHeader): { cacheKey: string; messageKey: Uint8Array } | null {
     const cacheKey = this.skipKey(header.dhPublicKey, header.messageNumber);
     const messageKey = this.skippedMessageKeys.get(cacheKey);
     return messageKey ? { cacheKey, messageKey } : null;
   }
 
-  /** Advances the current receiving chain up to (not including)
-   * `until`, caching every key passed along the way. Bounded by
-   * MAX_SKIP, refuses rather than let the cache grow unbounded. */
   private skipMessageKeysUntil(until: number): void {
     if (this.receivingChainKey === null || this.dhRemote === null) return;
     if (until - this.receiveMessageNumber > MAX_SKIP) {
@@ -170,13 +167,13 @@ export class DoubleRatchet {
     this.receiveMessageNumber = 0;
     this.dhRemote = remoteRatchetPublicKey;
 
-    const receiveStep = kdfRootKey(this.rootKey, deriveSharedSecret(this.dhSelf.privateKey, this.dhRemote));
-    this.rootKey = receiveStep.rootKey;
+    const receiveStep = kdfRootKey(this.#rootKey, deriveSharedSecret(this.dhSelf.privateKey, this.dhRemote));
+    this.#rootKey = receiveStep.rootKey;
     this.receivingChainKey = receiveStep.chainKey;
 
     this.dhSelf = generateX25519KeyPair();
-    const sendStep = kdfRootKey(this.rootKey, deriveSharedSecret(this.dhSelf.privateKey, this.dhRemote));
-    this.rootKey = sendStep.rootKey;
+    const sendStep = kdfRootKey(this.#rootKey, deriveSharedSecret(this.dhSelf.privateKey, this.dhRemote));
+    this.#rootKey = sendStep.rootKey;
     this.sendingChainKey = sendStep.chainKey;
   }
 
@@ -215,10 +212,6 @@ export class DoubleRatchet {
   }
 
   decrypt(header: RatchetHeader, ciphertext: Uint8Array, associatedData: Uint8Array = new Uint8Array(0)): Uint8Array {
-    // Decryption is transactional. All ratchet mutations happen on the
-    // live object only until authentication succeeds; any failure restores
-    // the exact pre-packet state, preventing forged ciphertext from causing
-    // ratchet desynchronization or consuming skipped-message keys.
     const before = snapshotState(this.getState());
 
     try {
@@ -230,9 +223,6 @@ export class DoubleRatchet {
       }
 
       if (this.dhRemote === null || !bytesEqual(header.dhPublicKey, this.dhRemote)) {
-        // Before abandoning the current receiving chain, cache keys for
-        // any messages from it that never arrived, per the header's own
-        // record of how many messages that chain contained.
         this.skipMessageKeysUntil(header.previousChainLength);
         this.performDhRatchetStep(header.dhPublicKey);
       }
