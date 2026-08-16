@@ -13,14 +13,17 @@ export interface IosBleBridge {
   onAdvertisement(callback: (peer: MobilePeer) => void): void;
   onFrame(callback: (peerId: string, frame: Uint8Array) => void): void;
   onConnectionChanged(callback: (peerId: string, connected: boolean) => void): void;
+  /** Native CoreBluetooth write-without-response capacity for this peer. */
+  getMaximumWriteLength?(peerId: string): number;
 }
 
 /**
  * iOS CoreBluetooth adapter. The transport boundary carries opaque Zaycomm
  * frames; protocol semantics remain in the TypeScript core.
  *
- * `MobilePeer.id` is the platform transport handle. On iOS this is the
- * CoreBluetooth UUID supplied by the OS, not a protocol identity.
+ * `MobilePeer.id` is the CoreBluetooth UUID supplied by the OS, not a
+ * protocol identity. The native bridge must never treat this UUID as proof
+ * of who the peer is.
  */
 export class IosBleTransport implements MobileTransport {
   readonly name = 'bluetooth-le-ios';
@@ -54,13 +57,12 @@ export class IosBleTransport implements MobileTransport {
   }
 
   async connect(peer: MobilePeer): Promise<void> {
-    await this.bridge.connect(peer.address);
+    await this.bridge.connect(peer.id);
   }
 
   async disconnect(peerId: string): Promise<void> {
-    const peer = this.peers.get(peerId);
-    if (!peer) return;
-    await this.bridge.disconnect(peer.address);
+    if (!this.peers.has(peerId)) return;
+    await this.bridge.disconnect(peerId);
     this.connected.delete(peerId);
   }
 
@@ -69,11 +71,12 @@ export class IosBleTransport implements MobileTransport {
     if (!peer || !this.connected.has(peerId)) {
       throw new Error(`BLE peer is not connected: ${peerId}`);
     }
+
     const mtu = this.getLinkCharacteristics(peerId)?.maxTransmissionUnit ?? 200;
     if (frame.byteLength > mtu) {
       throw new Error(`BLE frame exceeds transport MTU: ${frame.byteLength} > ${mtu}`);
     }
-    await this.bridge.write(peer.address, frame);
+    await this.bridge.write(peerId, frame);
   }
 
   onReceive(callback: (peerId: string, frame: Uint8Array) => void): void {
@@ -86,6 +89,10 @@ export class IosBleTransport implements MobileTransport {
 
   getLinkCharacteristics(peerId: string): MobileLinkCharacteristics | null {
     if (!this.peers.has(peerId)) return null;
-    return { maxTransmissionUnit: 200, reliability: 0.9 };
+    const nativeCapacity = this.bridge.getMaximumWriteLength?.(peerId) ?? 200;
+    return {
+      maxTransmissionUnit: Math.min(200, Math.max(0, nativeCapacity)),
+      reliability: 0.9,
+    };
   }
 }
