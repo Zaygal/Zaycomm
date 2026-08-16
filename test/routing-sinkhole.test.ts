@@ -62,6 +62,9 @@ describe('C9 routing sinkhole / blackhole resistance', () => {
     origin.receiveAdvertisement('relay', createRoutingAdvertisement(destination.identity, [destinationHint]));
     relay.receiveAdvertisement('destination', createRoutingAdvertisement(destination.identity, [destinationHint]));
     relay.receiveAdvertisement('origin', createRoutingAdvertisement(origin.identity, [originHint]));
+    // The destination needs a return route to the origin so its signed ACK can
+    // traverse the same relay path back to the sender.
+    destination.receiveAdvertisement('relay', createRoutingAdvertisement(origin.identity, [originHint]));
 
     destination.onDelivered((delivered) => {
       destination.sendAck(originHint, delivered.header.messageId);
