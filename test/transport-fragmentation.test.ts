@@ -27,6 +27,7 @@ describe('Fragmentation wired into the transport send path (RFC-0006 Section 5)'
     const bobStatic = generateX25519KeyPair();
     const aliceIdentity = createIdentity();
     const bobIdentity = createIdentity();
+    const relayIdentity = createIdentity();
 
     const { message: msg1, state: aliceHandshakeState, initiatorEphemeral } =
       initiatorWriteMessage1(aliceStatic, bobStatic.publicKey);
@@ -40,10 +41,17 @@ describe('Fragmentation wired into the transport send path (RFC-0006 Section 5)'
     const bobRatchet = DoubleRatchet.initAsResponder(bobHandshakeResult.rootKey, initialRatchetKeyPair);
 
     const aliceNode = new RelayNode('alice', aliceIdentity, createBluetoothTransport('alice'));
-    const relayNode = new RelayNode('relay', createIdentity(), createBluetoothTransport('relay'));
+    const relayNode = new RelayNode('relay', relayIdentity, createBluetoothTransport('relay'));
     const bobNode = new RelayNode('bob', bobIdentity, createBluetoothTransport('bob'));
     connectNodes(aliceNode, relayNode);
     connectNodes(relayNode, bobNode);
+
+    // C10: every fragmented hop must have an authenticated session before
+    // the receiver allocates reassembly state.
+    aliceNode.registerAuthenticatedPeer('relay', relayIdentity.publicKey);
+    relayNode.registerAuthenticatedPeer('alice', aliceIdentity.publicKey);
+    relayNode.registerAuthenticatedPeer('bob', bobIdentity.publicKey);
+    bobNode.registerAuthenticatedPeer('relay', relayIdentity.publicKey);
 
     const bobHint = computeDestinationHint(bobIdentity.publicKey);
     const bobAd = createRoutingAdvertisement(bobIdentity, [bobHint]);
@@ -98,9 +106,6 @@ describe('Fragmentation wired into the transport send path (RFC-0006 Section 5)'
     const b = new RelayNode('b', createIdentity(), createBluetoothTransport('b'));
     connectNodes(a, b);
 
-    // C8: store-forward synchronization is only available after the
-    // C3 authenticated session has been established. This test models
-    // that post-handshake state explicitly rather than bypassing it.
     a.registerAuthenticatedPeer('b', b.identity.publicKey);
     b.registerAuthenticatedPeer('a', a.identity.publicKey);
 
