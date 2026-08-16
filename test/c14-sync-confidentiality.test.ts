@@ -38,25 +38,36 @@ describe('C14 sync confidentiality', () => {
   it('uses the established session keys in the production RelayNode sync path', () => {
     const a = new RelayNode('a', createIdentity(), createInternetTransport('a'));
     const b = new RelayNode('b', createIdentity(), createInternetTransport('b'));
-    (a.transport as SimulatedTransport).connectPeer(b.transport as SimulatedTransport);
+    const aTransport = a.transport as SimulatedTransport;
+    aTransport.connectPeer(b.transport as SimulatedTransport);
 
     const aSend = new Uint8Array(32).fill(11);
     const aReceive = new Uint8Array(32).fill(12);
     b.registerAuthenticatedSession('a', a.identity.publicKey, { sessionId: 'handshake-session-a', sendKey: aReceive, receiveKey: aSend });
     a.registerAuthenticatedSession('b', b.identity.publicKey, { sessionId: 'handshake-session-a', sendKey: aSend, receiveKey: aReceive });
 
-    let received: Uint8Array | null = null;
-    b.onDelivered((envelope) => {
-      if (envelope.header.packetType === 4) received = envelope.sealedPayload;
-    });
+    let captured: Uint8Array | null = null;
+    const originalSend = aTransport.send.bind(aTransport);
+    aTransport.send = (neighborId: string, frame: Uint8Array) => {
+      if (neighborId === 'b' && frame[0] === 0) captured = Uint8Array.from(frame);
+      return originalSend(neighborId, frame);
+    };
+    try {
+      expect(a.initiateSync('b')).toBe(true);
+    } finally {
+      aTransport.send = originalSend;
+    }
 
-    expect(a.initiateSync('b')).toBe(true);
-    expect(received).not.toBeNull();
-
-    const outer = cbor.decode(received!) as [string, Uint8Array, Uint8Array];
+    expect(captured).not.toBeNull();
+    const outer = cbor.decode(captured!.slice(1)) as [string, Uint8Array, Uint8Array];
     expect(outer[0]).toBe('handshake-session-a');
     expect(outer[1]).toHaveLength(24);
-    expect(outer[2]).not.toEqual(new TextEncoder().encode('private store-forward content'));
+    expect(outer[2]).not.toEqual(plaintext);
+    expect(decryptSyncPayload(aSend, {
+      sessionId: outer[0],
+      nonce: Uint8Array.from(outer[1]),
+      ciphertext: Uint8Array.from(outer[2]),
+    })).toBeInstanceOf(Uint8Array);
   });
 
   it('drops production sync when the receiving session key does not match', () => {
