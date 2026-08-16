@@ -24,6 +24,10 @@ export interface QueueSummaryEntry {
   ttlRemaining: number;
 }
 
+// C13: storage state must not depend on an external caller remembering to
+// garbage-collect it. Reads and new allocations trigger bounded cleanup.
+export const STORE_FORWARD_MAX_AGE_SECONDS = 3600;
+
 export class StoreForwardQueue {
   private entries = new Map<string, StoredEnvelope>();
   private perNeighborCount = new Map<string, number>();
@@ -38,8 +42,12 @@ export class StoreForwardQueue {
    * Section 7), and enforces both a total capacity limit and a
    * per-neighbor share, directly addressing the storage exhaustion
    * and flooding threats in RFC-0002's catalog.
+   *
+   * C13 additionally purges stale entries before allocating new state.
    */
   store(envelope: Envelope, receivedFrom: string): StoreResult {
+    this.purgeExpired(STORE_FORWARD_MAX_AGE_SECONDS);
+
     if (!validateRoutingHeader(envelope.header)) {
       return { stored: false, reason: 'invalid header' };
     }
@@ -76,6 +84,7 @@ export class StoreForwardQueue {
    * forwarding attempt on data already known to be bad.
    */
   verifyIntegrity(messageId: Uint8Array): boolean {
+    this.purgeExpired(STORE_FORWARD_MAX_AGE_SECONDS);
     const entry = this.entries.get(bytesToHex(messageId));
     if (!entry) return false;
     const currentHash = sha256(encodeEnvelope(entry.envelope));
@@ -83,7 +92,7 @@ export class StoreForwardQueue {
   }
 
   /** Purges anything expired or older than maxAgeSeconds (RFC-0009 Section 4). */
-  purgeExpired(maxAgeSeconds: number = 3600): number {
+  purgeExpired(maxAgeSeconds: number = STORE_FORWARD_MAX_AGE_SECONDS): number {
     let purged = 0;
     for (const [key, entry] of this.entries) {
       if (!validateRoutingHeader(entry.envelope.header, maxAgeSeconds)) {
@@ -103,28 +112,33 @@ export class StoreForwardQueue {
     const entry = this.entries.get(key);
     if (entry) {
       const count = this.perNeighborCount.get(entry.receivedFrom) ?? 0;
-      this.perNeighborCount.set(entry.receivedFrom, Math.max(0, count - 1));
+      if (count <= 1) this.perNeighborCount.delete(entry.receivedFrom);
+      else this.perNeighborCount.set(entry.receivedFrom, count - 1);
     }
     this.entries.delete(key);
   }
 
   has(messageId: Uint8Array): boolean {
+    this.purgeExpired(STORE_FORWARD_MAX_AGE_SECONDS);
     return this.entries.has(bytesToHex(messageId));
   }
 
   size(): number {
+    this.purgeExpired(STORE_FORWARD_MAX_AGE_SECONDS);
     return this.entries.size;
   }
 
   /** Bounded summary for peer sync (RFC-0009 Section 6): ids and TTL only, never content. */
   getSummary(): QueueSummaryEntry[] {
+    this.purgeExpired(STORE_FORWARD_MAX_AGE_SECONDS);
     return Array.from(this.entries.values()).map((e) => ({
       messageId: e.envelope.header.messageId,
       ttlRemaining: e.envelope.header.ttl,
     }));
   }
 
-    getByDestination(destinationHint: Uint8Array): Envelope[] {
+  getByDestination(destinationHint: Uint8Array): Envelope[] {
+    this.purgeExpired(STORE_FORWARD_MAX_AGE_SECONDS);
     const hex = bytesToHex(destinationHint);
     return Array.from(this.entries.values())
       .filter((e) => bytesToHex(e.envelope.header.destinationHint) === hex)
@@ -134,6 +148,7 @@ export class StoreForwardQueue {
   /** Fetches specific envelopes by message id, used to answer a sync
    * peer's request for exactly what it's missing (RFC-0009 Section 6). */
   getByIds(messageIds: Uint8Array[]): Envelope[] {
+    this.purgeExpired(STORE_FORWARD_MAX_AGE_SECONDS);
     const idSet = new Set(messageIds.map(bytesToHex));
     return Array.from(this.entries.values())
       .filter((e) => idSet.has(bytesToHex(e.envelope.header.messageId)))
