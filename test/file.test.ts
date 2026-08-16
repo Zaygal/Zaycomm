@@ -33,7 +33,7 @@ describe('File chunking (RFC-0003 Section 7)', () => {
     const fileBytes = new Uint8Array(500).fill(7);
     const chunks = splitFileIntoChunks(fileBytes, 100);
     expect(chunks).toHaveLength(5);
-    expect(chunks[0].totalChunks).toBe(5);
+    expect(chunks[0].chunkCount).toBe(5);
   });
 
   it('round-trips a single file chunk through encode/decode', () => {
