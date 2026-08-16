@@ -15,9 +15,9 @@ const cbor = new Encoder();
 const BROADCAST_CONTEXT = 'ZAYCOMM_BROADCAST_V1';
 
 // C11: bound the amount of public traffic a single origin can inject.
-// These limits apply independently at each node/process that verifies a
-// broadcast, so one valid identity cannot create an unbounded forwarding
-// stream at any individual relay.
+// Receive quotas are maintained per node/process. The local creation quota
+// is separate so an in-process test topology does not make a node's own
+// broadcasts consume the relay's inbound budget.
 export const MAX_BROADCAST_CONTENT_BYTES = 4096;
 export const BROADCAST_RATE_WINDOW_MS = 60 * 1000;
 export const MAX_BROADCASTS_PER_ORIGIN_PER_WINDOW = 20;
@@ -36,13 +36,14 @@ function buildSigningMessage(content: Uint8Array, timestamp: number): Uint8Array
 }
 
 type RateWindow = { windowStartedAt: number; count: number };
-const originRateWindows = new Map<string, RateWindow>();
+const creationRateWindows = new Map<string, RateWindow>();
+const receiveRateWindows = new Map<string, RateWindow>();
 
-function consumeOriginBudget(senderPublicKey: Uint8Array, nowMs: number): boolean {
+function consumeBudget(windows: Map<string, RateWindow>, senderPublicKey: Uint8Array, nowMs: number): boolean {
   const key = bytesToHex(senderPublicKey);
-  const existing = originRateWindows.get(key);
+  const existing = windows.get(key);
   if (!existing || nowMs - existing.windowStartedAt >= BROADCAST_RATE_WINDOW_MS) {
-    originRateWindows.set(key, { windowStartedAt: nowMs, count: 1 });
+    windows.set(key, { windowStartedAt: nowMs, count: 1 });
     return true;
   }
   if (existing.count >= MAX_BROADCASTS_PER_ORIGIN_PER_WINDOW) return false;
@@ -51,8 +52,10 @@ function consumeOriginBudget(senderPublicKey: Uint8Array, nowMs: number): boolea
 }
 
 function purgeRateWindows(nowMs: number): void {
-  for (const [key, window] of originRateWindows) {
-    if (nowMs - window.windowStartedAt >= BROADCAST_RATE_WINDOW_MS) originRateWindows.delete(key);
+  for (const windows of [creationRateWindows, receiveRateWindows]) {
+    for (const [key, window] of windows) {
+      if (nowMs - window.windowStartedAt >= BROADCAST_RATE_WINDOW_MS) windows.delete(key);
+    }
   }
 }
 
@@ -60,7 +63,7 @@ export function createBroadcastMessage(identity: Identity, content: Uint8Array):
   if (content.length > MAX_BROADCAST_CONTENT_BYTES) throw new Error('BROADCAST_PAYLOAD_TOO_LARGE');
   const nowMs = Date.now();
   purgeRateWindows(nowMs);
-  if (!consumeOriginBudget(identity.publicKey, nowMs)) throw new Error('BROADCAST_RATE_LIMITED');
+  if (!consumeBudget(creationRateWindows, identity.publicKey, nowMs)) throw new Error('BROADCAST_RATE_LIMITED');
   const timestamp = Math.floor(nowMs / 1000);
   const signature = signMessage(buildSigningMessage(content, timestamp), identity.privateKey);
   return { senderPublicKey: identity.publicKey, content, timestamp, signature };
@@ -74,7 +77,7 @@ export function verifyBroadcastMessage(message: BroadcastMessage): boolean {
     if (!verifySignature(message.signature, buildSigningMessage(message.content, message.timestamp), message.senderPublicKey)) return false;
     const nowMs = Date.now();
     purgeRateWindows(nowMs);
-    return consumeOriginBudget(message.senderPublicKey, nowMs);
+    return consumeBudget(receiveRateWindows, message.senderPublicKey, nowMs);
   } catch {
     return false;
   }
