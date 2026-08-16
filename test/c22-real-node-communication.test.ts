@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createIdentity } from '../src/identity/identity';
-import { createDataEnvelope } from '../src/envelope/envelope';
+import { createDataEnvelope, openDataEnvelope } from '../src/envelope/envelope';
 import { computeDestinationHint, createRoutingAdvertisement, RelayNode } from '../src/routing/routing';
 import { createUdpTransport, type UdpTransport } from '../src/transport/udp';
 
@@ -51,7 +51,8 @@ describe('C22 real node communication', () => {
       let acknowledged = false;
       bob.onDelivered((envelope) => {
         delivered = true;
-        expect(new TextDecoder().decode(envelope.sealedPayload)).toContain('hello real nodes');
+        const opened = openDataEnvelope(envelope);
+        expect(new TextDecoder().decode(opened.ciphertext)).toBe('hello real nodes');
         bob.sendAck(aliceHint, envelope.header.messageId);
       });
       alice.onAckReceived(() => { acknowledged = true; });
