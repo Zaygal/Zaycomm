@@ -1,24 +1,34 @@
 import * as readline from 'node:readline';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { createUdpTransport, type UdpTransport } from '../transport/udp';
-import { RelayNode } from '../routing/routing';
+import { createUdpTransport } from '../transport/udp';
+import { RelayNode, type RoutingAdvertisement } from '../routing/routing';
 import { openDataEnvelope, decodeEnvelope } from '../envelope/envelope';
 import type { Identity } from '../identity/identity';
 
 interface PeerConfig { id: string; host: string; port: number; publicKey: string; }
-interface SessionConfig { id: string; peerId: string; sessionId: string; sendKey: string; receiveKey: string; }
-interface NodeConfig { id: string; privateKey: string; port?: number; host?: string; peers?: PeerConfig[]; sessions?: SessionConfig[]; }
+interface SessionConfig { peerId: string; sessionId: string; sendKey: string; receiveKey: string; }
+interface NodeConfig { id: string; privateKey: string; port?: number; host?: string; peers?: PeerConfig[]; sessions?: SessionConfig[]; ackDestinationHint?: string; }
+interface AdvertisementWire { advertiserPublicKey: string; reachableDestinations: string[]; timestamp: number; signature: string; }
 
 type Command =
   | { op: 'add-peer'; peer: PeerConfig }
   | { op: 'auth-peer'; peerId: string; publicKey: string }
-  | { op: 'advertise'; fromPeerId: string; advertisement: unknown }
+  | { op: 'advertise'; fromPeerId: string; advertisement: AdvertisementWire }
   | { op: 'send-envelope'; envelope: string }
   | { op: 'shutdown' };
 
-const bytes = (hex: string): Uint8Array => Uint8Array.from(Buffer.from(hex, 'hex'));
+const bytes = (value: string): Uint8Array => Uint8Array.from(Buffer.from(value, 'hex'));
 const hex = (value: Uint8Array): string => Buffer.from(value).toString('hex');
 const emit = (event: Record<string, unknown>): void => process.stdout.write(`${JSON.stringify(event)}\n`);
+
+function decodeAdvertisement(wire: AdvertisementWire): RoutingAdvertisement {
+  return {
+    advertiserPublicKey: bytes(wire.advertiserPublicKey),
+    reachableDestinations: wire.reachableDestinations.map(bytes),
+    timestamp: wire.timestamp,
+    signature: bytes(wire.signature),
+  };
+}
 
 async function main(): Promise<void> {
   const raw = process.env.ZAYCOMM_NODE_CONFIG;
@@ -36,7 +46,9 @@ async function main(): Promise<void> {
   };
   for (const peer of config.peers ?? []) configurePeer(peer);
   for (const session of config.sessions ?? []) {
-    node.registerAuthenticatedSession(session.peerId, bytes(session.peerId === session.id ? session.peerId : (config.peers ?? []).find((p) => p.id === session.peerId)?.publicKey ?? ''), {
+    const peer = (config.peers ?? []).find((candidate) => candidate.id === session.peerId);
+    if (!peer) throw new Error(`SESSION_PEER_NOT_FOUND:${session.peerId}`);
+    node.registerAuthenticatedSession(session.peerId, bytes(peer.publicKey), {
       sessionId: session.sessionId,
       sendKey: bytes(session.sendKey),
       receiveKey: bytes(session.receiveKey),
@@ -47,7 +59,7 @@ async function main(): Promise<void> {
     try {
       const opened = openDataEnvelope(envelope);
       emit({ event: 'delivered', messageId: hex(envelope.header.messageId), plaintext: new TextDecoder().decode(opened.ciphertext) });
-      node.sendAck(envelope.header.sourceHint, envelope.header.messageId);
+      if (config.ackDestinationHint) node.sendAck(bytes(config.ackDestinationHint), envelope.header.messageId);
     } catch {
       emit({ event: 'delivered', messageId: hex(envelope.header.messageId) });
     }
@@ -72,7 +84,7 @@ async function main(): Promise<void> {
             emit({ event: 'peer-authenticated', peerId: command.peerId });
             break;
           case 'advertise':
-            node.receiveAdvertisement(command.fromPeerId, command.advertisement as Parameters<RelayNode['receiveAdvertisement']>[1]);
+            node.receiveAdvertisement(command.fromPeerId, decodeAdvertisement(command.advertisement));
             emit({ event: 'advertisement-processed', fromPeerId: command.fromPeerId });
             break;
           case 'send-envelope': {
