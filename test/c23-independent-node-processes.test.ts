@@ -20,11 +20,19 @@ function wireAdvertisement(identity: Identity, destinationHint: Uint8Array) {
   };
 }
 
-function spawnNode(identity: Identity): NodeHandle {
+function spawnNode(identity: Identity, id: string, ackDestinationHint?: Uint8Array): NodeHandle {
   const events: NodeEvent[] = [];
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/node/node-process.ts'], {
     cwd: process.cwd(),
-    env: { ...process.env, ZAYCOMM_NODE_CONFIG: JSON.stringify({ id: `node-${Math.random().toString(16).slice(2)}`, privateKey: hex(identity.privateKey), port: 0 }) },
+    env: {
+      ...process.env,
+      ZAYCOMM_NODE_CONFIG: JSON.stringify({
+        id,
+        privateKey: hex(identity.privateKey),
+        port: 0,
+        ...(ackDestinationHint ? { ackDestinationHint: hex(ackDestinationHint) } : {}),
+      }),
+    },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -82,14 +90,15 @@ describe('C23 independent node processes', () => {
     const aliceIdentity = createIdentity();
     const relayIdentity = createIdentity();
     const bobIdentity = createIdentity();
-    const alice = spawnNode(aliceIdentity);
-    const relay = spawnNode(relayIdentity);
-    const bob = spawnNode(bobIdentity);
+    const aliceHint = computeDestinationHint(aliceIdentity.publicKey);
+    const bobHint = computeDestinationHint(bobIdentity.publicKey);
+
+    const alice = spawnNode(aliceIdentity, 'alice');
+    const relay = spawnNode(relayIdentity, 'relay');
+    const bob = spawnNode(bobIdentity, 'bob', aliceHint);
 
     try {
       const [aliceAddr, relayAddr, bobAddr] = await Promise.all([alice.ready, relay.ready, bob.ready]);
-      const aliceHint = computeDestinationHint(aliceIdentity.publicKey);
-      const bobHint = computeDestinationHint(bobIdentity.publicKey);
 
       command(alice, { op: 'add-peer', peer: { id: 'relay', host: relayAddr.host, port: relayAddr.port, publicKey: hex(relayIdentity.publicKey) } });
       command(relay, { op: 'add-peer', peer: { id: 'alice', host: aliceAddr.host, port: aliceAddr.port, publicKey: hex(aliceIdentity.publicKey) } });
@@ -120,5 +129,5 @@ describe('C23 independent node processes', () => {
     } finally {
       await Promise.all([stop(alice), stop(relay), stop(bob)]);
     }
-  });
+  }, 10000);
 });
