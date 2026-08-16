@@ -89,7 +89,10 @@ class ZaycommBleModule(private val context: ReactApplicationContext) : ReactCont
                 emit("ZaycommBleConnectionChanged", Arguments.createMap().apply { putString("address", device.address); putBoolean("connected", connected) })
             }
             override fun onDescriptorWriteRequest(device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor, preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray) {
-                if (descriptor.uuid == cccdUuid && responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                if (descriptor.uuid == cccdUuid) {
+                    if (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) descriptor.value = value
+                    if (responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                }
             }
             override fun onCharacteristicWriteRequest(device: BluetoothDevice, requestId: Int, characteristic: BluetoothGattCharacteristic, preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray) {
                 if (characteristic.uuid != frameUuid || value.size > 200) return
@@ -132,7 +135,32 @@ class ZaycommBleModule(private val context: ReactApplicationContext) : ReactCont
                 emit("ZaycommBleConnectionChanged", Arguments.createMap().apply { putString("address", address); putBoolean("connected", connected) })
             }
             override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-                if (status == BluetoothGatt.GATT_SUCCESS) promise.resolve(null) else promise.reject("BLE_GATT", "Service discovery failed: $status")
+                if (status != BluetoothGatt.GATT_SUCCESS) { promise.reject("BLE_GATT", "Service discovery failed: $status"); return }
+                val characteristic = gatt.getService(serviceUuid)?.getCharacteristic(frameUuid)
+                if (characteristic == null) { promise.reject("BLE_SERVICE", "Zaycomm frame characteristic not found"); return }
+
+                // Enable notifications before resolving the connection. This
+                // is required for Android to receive frames sent by an iOS
+                // CoreBluetooth peripheral and for Android↔Android symmetry.
+                val canNotify = characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
+                if (canNotify && gatt.setCharacteristicNotification(characteristic, true)) {
+                    val descriptor = characteristic.getDescriptor(cccdUuid)
+                    if (descriptor != null) {
+                        descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            gatt.writeDescriptor(descriptor)
+                        }
+                    }
+                }
+                promise.resolve(null)
+            }
+            override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                if (descriptor.uuid == cccdUuid && status != BluetoothGatt.GATT_SUCCESS) {
+                    emit("ZaycommBleConnectionChanged", Arguments.createMap().apply { putString("address", address); putBoolean("connected", false) })
+                }
             }
             override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
                 if (characteristic.uuid != frameUuid) return
