@@ -8,6 +8,8 @@ import { createBluetoothTransport, type SimulatedTransport } from '../src/transp
 
 function connectNodes(a: RelayNode, b: RelayNode): void {
   (a.transport as SimulatedTransport).connectPeer(b.transport as SimulatedTransport);
+  a.registerAuthenticatedPeer(b.id, b.identity.publicKey);
+  b.registerAuthenticatedPeer(a.id, a.identity.publicKey);
 }
 
 const text = (s: string) => new TextEncoder().encode(s);
