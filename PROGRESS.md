@@ -7,7 +7,8 @@ actually exists right now."
 
 **Status: v1.0 shipped.** All seven RFC-0010 phases complete, plus
 every high-priority gap surfaced during implementation has been
-closed. 104 tests passing across 19 files.
+closed. The security hardening campaign is now tracked below in this
+same file.
 
 **Stack:** TypeScript, Node, vitest.
 **Repo:** `/workspaces/Zaycomm` (public, github.com/Zaygal/Zaycomm)
@@ -125,24 +126,143 @@ sealed sender field, calls `sendAck()` explicitly.
 
 Scoped to **sender-facing delivery confirmation**, a real and useful
 feature, rather than full multi-hop relay queue cleanup, which would
-need either flooding the ack to every possible holder or path
-tracking (removed deliberately for metadata minimization). Relays
-already clear their own queue on successful forward (since Phase 4),
-so the storage-hygiene gap this leaves is narrower than it first
-looked.
+need either flooding the ack to every possible holder or path tracking
+(removed deliberately for metadata minimization). Relays already clear
+their own queue on successful forward (since Phase 4), so the storage-
+hygiene gap this leaves is narrower than it first looked.
 
 ### Sybil-resistant routing trust (RFC-0007 §6) — ✅ COMPLETE
 `src/routing/routing.ts`
 
 **Real vulnerability closed, not a hypothetical one:** `RoutingTable`
-used to store one next-hop per destination in a plain `Map`, every
-new advertisement silently overwrote it. A freshly created Sybil
-identity could hijack an already-trusted route just by advertising
-*later*, no signature needed breaking. Now every candidate neighbor
-is remembered, and the one with the highest trust score wins, trust
-earned only through real ack correlation (a neighbor a message was
-routed through gets credited when an ack for that exact message id
-comes back), never inferred from recency or claims alone.
+used to store one next-hop per destination in a plain `Map`, every new
+advertisement silently overwrote it. A freshly created Sybil identity
+could hijack an already-trusted route just by advertising *later*, no
+signature needed breaking. Now every candidate neighbor is remembered,
+and the one with the highest trust score wins, trust earned only through
+real ack correlation (a neighbor a message was routed through gets
+credited when an ack for that exact message id comes back), never
+inferred from recency or claims alone.
+
+---
+
+# Security Hardening Progress — C1–C20
+
+This section is embedded in the main `PROGRESS.md` so there is one
+source of truth for what security work is actually implemented,
+tested, or still pending. The architecture and complete security plan
+remain in `README.md`.
+
+## Completed
+
+### C1 — Ratchet rollback / state corruption — ✅ COMPLETE
+Failed decryptions cannot leave the ratchet permanently advanced or
+consume skipped-message state incorrectly.
+
+### C2 — ACK / trust manipulation — ✅ COMPLETE
+Trust changes require authenticated, context-valid ACK evidence rather
+than unauthenticated acknowledgements.
+
+### C3 — Identity ↔ session binding — ✅ COMPLETE
+Established sessions are bound to the authenticated peer identity and
+expected handshake context.
+
+### C4 — Hostile transport / parser input — ✅ COMPLETE
+Malformed transport and parser inputs are rejected before they can
+corrupt protocol state.
+
+### C5 — Envelope / header tampering — ✅ COMPLETE
+Security-sensitive envelope fields are authenticated; mutable relay
+fields are deliberately excluded where protocol semantics require
+mutation.
+
+### C6 — Fragment resource exhaustion — ✅ COMPLETE
+Reassembly is bounded by global fragment-set and byte limits.
+
+### C7 — Routing advertisement replay / staleness — ✅ COMPLETE
+Routing advertisements are authenticated and freshness/replay
+controlled.
+
+### C8 — Unauthorized store-forward sync — ✅ COMPLETE
+Sync requests require authenticated peers and identity-bound
+authorization.
+
+### C9 — Routing sinkhole / blackhole resistance — ✅ COMPLETE
+Advertised routes are probationary until destination delivery is
+validated by an authenticated ACK. Route state expires and failed
+validation prevents indefinite route attraction.
+
+### C10 — Fragment-state exhaustion / message-ID squatting — ✅ COMPLETE
+Reassembly performs automatic stale cleanup, preserves the global
+RFC-0006 limits, applies per-peer quotas to authenticated traffic, and
+binds fragment ownership to authenticated peer/session context.
+
+### C11 — Broadcast amplification — ✅ COMPLETE
+Broadcast content is capped at 4 KiB. Origins are rate limited to 20
+broadcasts per 60 seconds, with separate creation and receiving budgets.
+Duplicate suppression remains distinct from rate limiting and rate
+windows are automatically cleaned up.
+
+## Pending adversarial campaign
+
+### C12 — Routing / trust cryptographic binding — 🔴 NEXT
+Bind route state explicitly to peer identity, authenticated neighbor,
+and authenticated session context so trust cannot be applied to the
+wrong route provenance.
+
+### C13 — Automatic stale-state cleanup — 🔴 PENDING
+Audit routing, broadcast, fragment, sync, replay-cache, and authenticated
+peer state so every security-sensitive allocation has creation,
+expiration, and cleanup behavior.
+
+### C14 — Sync confidentiality — 🔴 PENDING
+Ensure store-forward synchronization occurs inside the established
+encrypted/authenticated session rather than relying only on signed sync
+requests.
+
+### C15 — Handshake root-key exposure — 🟡 PENDING
+Encapsulate sensitive root-key material and prevent external mutation or
+unnecessary exposure through the ratchet API.
+
+### C16 — Cross-phase adversarial attacks — 🔴 PENDING
+Combine previously isolated attack surfaces, including authentication
++ sync, fragmentation + sync, routing replay + sinkhole,
+envelope authentication + fragmentation, and routing + broadcast
+amplification.
+
+### C17 — Replay campaign — 🔴 PENDING
+Test replay across sessions, neighbors, routes, sync, broadcasts, and
+ratchet states.
+
+### C18 — Malicious-neighbor campaign — 🔴 PENDING
+Assume the attacker has a legitimate cryptographic identity and test
+packet dropping, delaying, selective forwarding, route poisoning,
+broadcast flooding, and sync abuse.
+
+### C19 — Fuzzing / malformed-wire campaign — 🔴 PENDING
+Attack CBOR, envelopes, fragments, routing advertisements, sync
+messages, ACKs, and handshake inputs with malformed and boundary
+values.
+
+### C20 — Concurrency / state-race campaign — 🔴 PENDING
+Test simultaneous handshakes, decryptions, retransmissions, fragment
+arrivals, route changes, sync, and teardown/reconnect for state
+corruption.
+
+## Security release gate
+
+`Test` is not release-ready until C12–C20 and the final high-adversary
+scan pass. Historical regression counts alone are not sufficient
+security evidence.
+
+### Security test history
+
+| Security milestone | Total tests |
+|---|---:|
+| C1–C8 baseline | 143 |
+| C9 sinkhole defense | 145 |
+| C10 fragment exhaustion defense | 149 |
+| C11 broadcast amplification defense | **152** |
 
 ---
 
@@ -161,7 +281,7 @@ comes back), never inferred from recency or claims alone.
 ## Test count history
 
 | Milestone | Total tests |
-|---|---|
+|---|---:|
 | Phase 1 start | 5 |
 | Phase 1 complete | 27 |
 | Phase 3 complete | 34 |
@@ -175,7 +295,11 @@ comes back), never inferred from recency or claims alone.
 | Fragmentation in transport | 91 |
 | Phase 7 complete (+ voice.ts) | 98 |
 | Ack-triggered confirmation | 101 |
-| **Sybil-resistant trust (current)** | **104** |
+| Sybil-resistant trust | 104 |
+| C1–C8 adversarial hardening | 143 |
+| C9 sinkhole defense | 145 |
+| C10 fragment exhaustion defense | 149 |
+| **C11 broadcast amplification defense (current)** | **152** |
 
 ---
 
@@ -188,12 +312,12 @@ comes back), never inferred from recency or claims alone.
   `.encode()` and `.decode()`. Anything not used immediately needs
   `Uint8Array.from(...)` to force a copy. Applied everywhere now.
 - **A transport `send()` failure can desync the ratchet** if the
-  caller doesn't know the send will fail before encrypting. Root
-  cause of the original file-chunk bug, fixed at the source by
+  caller doesn't know the send will fail before encrypting. Root cause
+  of the original file-chunk bug, fixed at the source by
   fragmentation-in-transport rather than worked around per-call-site.
 - Full-file mobile pastes have occasionally silently failed to save,
-  verify with `grep -c <a-symbol-only-in-the-new-version> <file>`
-  before running tests, don't assume a paste landed.
+  verify with `grep -c <a-symbol-only-in-the-new-version> <file>` before
+  running tests, don't assume a paste landed.
 - Multi-line text in mobile find-and-replace doesn't reliably match,
   split into single-line edits.
 - Watch for autocorrect mangling package names (`@noble` → `@nobles`)
@@ -202,6 +326,5 @@ comes back), never inferred from recency or claims alone.
 
 ---
 
-*Last updated: v1.0. All RFC-0010 phases and every high-priority
-implementation gap closed. Remaining work is lower-priority breadth
-(long range radio transport) rather than correctness.*
+*Last updated: C11 complete, 152/152 tests passing on `Test`. Remaining
+security work is C12–C20 plus the final adversarial release scan.*
