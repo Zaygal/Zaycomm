@@ -32,6 +32,8 @@ describe('Delivery acknowledgment (RFC-0007 Section 7)', () => {
     const alice = new RelayNode('alice', createIdentity(), createBluetoothTransport('alice'));
     const bob = new RelayNode('bob', createIdentity(), createBluetoothTransport('bob'));
     connectNodes(alice, bob);
+    alice.registerAuthenticatedPeer('bob', bob.identity.publicKey);
+    bob.registerAuthenticatedPeer('alice', alice.identity.publicKey);
 
     const aliceHint = computeDestinationHint(alice.identity.publicKey);
     const bobHint = computeDestinationHint(bob.identity.publicKey);
@@ -61,6 +63,8 @@ describe('Delivery acknowledgment (RFC-0007 Section 7)', () => {
     const bob = new RelayNode('bob', createIdentity(), createBluetoothTransport('bob'));
     const attacker = createIdentity();
     connectNodes(alice, bob);
+    alice.registerAuthenticatedPeer('bob', bob.identity.publicKey);
+    bob.registerAuthenticatedPeer('alice', alice.identity.publicKey);
 
     const aliceHint = computeDestinationHint(alice.identity.publicKey);
     const bobHint = computeDestinationHint(bob.identity.publicKey);
@@ -108,6 +112,8 @@ describe('Delivery acknowledgment (RFC-0007 Section 7)', () => {
     const aliceNode = new RelayNode('alice', aliceIdentity, createBluetoothTransport('alice'));
     const bobNode = new RelayNode('bob', bobIdentity, createBluetoothTransport('bob'));
     connectNodes(aliceNode, bobNode);
+    aliceNode.registerAuthenticatedPeer('bob', bobIdentity.publicKey);
+    bobNode.registerAuthenticatedPeer('alice', aliceIdentity.publicKey);
 
     const bobHint = computeDestinationHint(bobIdentity.publicKey);
     const aliceHint = computeDestinationHint(aliceIdentity.publicKey);
