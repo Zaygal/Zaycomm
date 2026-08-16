@@ -124,7 +124,9 @@ Broadcast size and origin/receiver budgets are bounded, with duplicate suppressi
 
 Route trust now carries explicit provenance: destination identity, destination hint, authenticated neighbor identity, and session context. ACK processing preserves the critical distinction: **destination signer proves delivery; authenticated neighbor proves the relay path**. A destination signer is not incorrectly treated as the relay neighbor in a legitimate multi-hop route.
 
-The new integration coverage exercises the A → B → C → B → A path. C12 is intentionally not marked complete until the actual Codespace regression passes.
+Verification initially exposed a routing regression: the implementation had incorrectly required a signed destination advertisement's signer to equal the immediate authenticated relay neighbor. That broke legitimate A → relay → destination propagation and caused cascading failures in routing, transport-fragmentation, sync, and voice tests. The fix now accepts a valid destination-signed advertisement through an authenticated neighbor while keeping route trust probationary until correlated ACK validation binds the destination signer to that neighbor/session.
+
+The fix is committed to `Test`; C12 remains pending until the Codespace regression passes.
 
 ### C13 — Automatic stale-state cleanup — ✅ COMPLETE
 Routing, broadcast, fragment, sync replay, pending-ACK, and related security-sensitive state have bounded lifetime/cleanup behavior.
@@ -158,7 +160,7 @@ Concurrency/state-race scenarios from the adversarial campaign have been impleme
 
 ### Current implementation state
 
-The latest implementation work adds the C12/C14 node-communication path and dedicated integration tests. The GitHub branch contains the source changes, but CI has not yet produced a status for the latest implementation commit. Therefore this document does not claim C12/C14 complete or claim a new passing test count before execution.
+The latest implementation work corrects relay advertisement handling for multi-hop routing. The branch contains the source fix and dedicated C12/C14 integration tests. The observed Codespace run had **31 failed / 168 passed (199 total)**; those failures were dominated by the routing-advertisement regression described under C12. A fresh regression run is required before updating the verified test count.
 
 ---
 
@@ -193,6 +195,7 @@ The latest implementation work adds the C12/C14 node-communication path and dedi
 | C11 broadcast amplification defense | 152 |
 | C15–C20 adversarial campaign | **194** |
 | C12/C14 integration tests added | **194 + new tests pending execution** |
+| Latest observed verification run | **168 passed / 31 failed (199 total)** |
 
 ---
 
@@ -206,4 +209,4 @@ The latest implementation work adds the C12/C14 node-communication path and dedi
 
 ---
 
-*Last updated: C12/C14 implementation pass added to `Test`; final end-to-end verification and release regression remain pending.*
+*Last updated: routing verification regression identified and corrected; fresh Codespace regression pending.*
