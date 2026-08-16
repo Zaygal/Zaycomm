@@ -2,16 +2,13 @@
 // RFC-0006 Section 4, RFC-0001's emergency broadcast goal.
 //
 // A broadcast has no single recipient, so it can't be encrypted with
-// a specific person's double ratchet, there's no "other party" to
-// ratchet with. Instead it's signed, same domain-separation pattern
-// already used for routing advertisements and device statements, so
-// anyone receiving it can verify who actually sent it. Broadcast
-// content itself is necessarily public, that's the honest tradeoff
-// for something meant to reach everyone.
+// a specific person's double ratchet, that's the honest tradeoff for
+// something meant to reach everyone. It is signed so receivers can
+// authenticate the origin.
 
 import { Encoder } from 'cbor-x';
 import { signMessage, verifySignature } from '../crypto/keys';
-import { concatBytes, u64le } from '../util';
+import { concatBytes, u64le, bytesToHex } from '../util';
 import type { Identity } from '../identity/identity';
 
 const cbor = new Encoder();
@@ -19,8 +16,8 @@ const BROADCAST_CONTEXT = 'ZAYCOMM_BROADCAST_V1';
 
 // C11: bound the amount of public traffic a single origin can inject.
 // These limits apply independently at each node/process that verifies a
-// broadcast, so a malicious origin cannot turn one valid signature into an
-// unbounded mesh-wide forwarding stream.
+// broadcast, so one valid identity cannot create an unbounded forwarding
+// stream at any individual relay.
 export const MAX_BROADCAST_CONTENT_BYTES = 4096;
 export const BROADCAST_RATE_WINDOW_MS = 60 * 1000;
 export const MAX_BROADCASTS_PER_ORIGIN_PER_WINDOW = 20;
@@ -42,7 +39,7 @@ type RateWindow = { windowStartedAt: number; count: number };
 const originRateWindows = new Map<string, RateWindow>();
 
 function consumeOriginBudget(senderPublicKey: Uint8Array, nowMs: number): boolean {
-  const key = Buffer.from(senderPublicKey).toString('hex');
+  const key = bytesToHex(senderPublicKey);
   const existing = originRateWindows.get(key);
   if (!existing || nowMs - existing.windowStartedAt >= BROADCAST_RATE_WINDOW_MS) {
     originRateWindows.set(key, { windowStartedAt: nowMs, count: 1 });
