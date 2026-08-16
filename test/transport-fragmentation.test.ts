@@ -19,6 +19,8 @@ const decode = (b: Uint8Array) => new TextDecoder().decode(b);
 
 function connectNodes(a: RelayNode, b: RelayNode): void {
   (a.transport as SimulatedTransport).connectPeer(b.transport as SimulatedTransport);
+  a.registerAuthenticatedPeer(b.id, b.identity.publicKey);
+  b.registerAuthenticatedPeer(a.id, a.identity.publicKey);
 }
 
 describe('Fragmentation wired into the transport send path (RFC-0006 Section 5)', () => {
@@ -45,13 +47,6 @@ describe('Fragmentation wired into the transport send path (RFC-0006 Section 5)'
     const bobNode = new RelayNode('bob', bobIdentity, createBluetoothTransport('bob'));
     connectNodes(aliceNode, relayNode);
     connectNodes(relayNode, bobNode);
-
-    // C10: every fragmented hop must have an authenticated session before
-    // the receiver allocates reassembly state.
-    aliceNode.registerAuthenticatedPeer('relay', relayIdentity.publicKey);
-    relayNode.registerAuthenticatedPeer('alice', aliceIdentity.publicKey);
-    relayNode.registerAuthenticatedPeer('bob', bobIdentity.publicKey);
-    bobNode.registerAuthenticatedPeer('relay', relayIdentity.publicKey);
 
     const bobHint = computeDestinationHint(bobIdentity.publicKey);
     const bobAd = createRoutingAdvertisement(bobIdentity, [bobHint]);
@@ -106,8 +101,10 @@ describe('Fragmentation wired into the transport send path (RFC-0006 Section 5)'
     const b = new RelayNode('b', createIdentity(), createBluetoothTransport('b'));
     connectNodes(a, b);
 
-    a.registerAuthenticatedPeer('b', b.identity.publicKey);
-    b.registerAuthenticatedPeer('a', a.identity.publicKey);
+    const aSend = new Uint8Array(32).fill(31);
+    const aReceive = new Uint8Array(32).fill(32);
+    a.registerAuthenticatedSession('b', b.identity.publicKey, { sessionId: 'fragment-sync', sendKey: aSend, receiveKey: aReceive });
+    b.registerAuthenticatedSession('a', a.identity.publicKey, { sessionId: 'fragment-sync', sendKey: aReceive, receiveKey: aSend });
 
     const destinationHint = new Uint8Array(8).fill(3);
     for (let i = 0; i < 5; i++) {
@@ -121,7 +118,7 @@ describe('Fragmentation wired into the transport send path (RFC-0006 Section 5)'
     }
     expect(a.queueSize()).toBe(5);
 
-    a.initiateSync('b');
+    expect(a.initiateSync('b')).toBe(true);
 
     expect(b.queueSize()).toBe(5);
   });
