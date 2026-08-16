@@ -15,6 +15,8 @@ type Command =
   | { op: 'auth-peer'; peerId: string; publicKey: string }
   | { op: 'advertise'; fromPeerId: string; advertisement: AdvertisementWire }
   | { op: 'send-envelope'; envelope: string }
+  | { op: 'initiate-sync'; peerId: string }
+  | { op: 'status' }
   | { op: 'shutdown' };
 
 const bytes = (value: string): Uint8Array => Uint8Array.from(Buffer.from(value, 'hex'));
@@ -92,6 +94,12 @@ async function main(): Promise<void> {
             emit({ event: 'send-result', result });
             break;
           }
+          case 'initiate-sync':
+            emit({ event: 'sync-result', peerId: command.peerId, initiated: node.initiateSync(command.peerId) });
+            break;
+          case 'status':
+            emit({ event: 'status', id: node.id, queueSize: node.queueSize(), authenticatedPeers: [command.op] });
+            break;
           case 'shutdown':
             await shutdown();
             break;
