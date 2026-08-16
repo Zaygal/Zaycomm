@@ -81,8 +81,6 @@ export class FragmentReassembler {
    * RFC-0006 primitive backwards-compatible for standalone reassembly tests.
    */
   addFragment(wireFragment: Uint8Array, peerId: string = 'unknown'): Envelope | null {
-    // C10: cleanup happens on the allocation path, so callers cannot forget
-    // to invoke purgeStale() before an attacker starts another allocation wave.
     this.purgeStale(DEFAULT_FRAGMENT_MAX_AGE_MS);
 
     if (wireFragment.length > MAX_FRAGMENT_SIZE + FRAGMENT_OVERHEAD_ESTIMATE + 64) return null;
@@ -95,14 +93,15 @@ export class FragmentReassembler {
 
     const key = bytesToHex(fragment.messageId);
     let entry = this.pending.get(key);
+    const hasAuthenticatedPeer = peerId !== 'unknown';
 
     if (!entry) {
       const peerSets = this.peerPendingSets.get(peerId) ?? 0;
       const peerBytes = this.peerPendingBytes.get(peerId) ?? 0;
       if (this.pending.size >= MAX_PENDING_FRAGMENT_SETS) return null;
-      if (peerSets >= MAX_PENDING_FRAGMENT_SETS_PER_PEER) return null;
+      if (hasAuthenticatedPeer && peerSets >= MAX_PENDING_FRAGMENT_SETS_PER_PEER) return null;
       if (fragment.data.length > MAX_PENDING_FRAGMENT_BYTES) return null;
-      if (peerBytes + fragment.data.length > MAX_PENDING_FRAGMENT_BYTES_PER_PEER) return null;
+      if (hasAuthenticatedPeer && peerBytes + fragment.data.length > MAX_PENDING_FRAGMENT_BYTES_PER_PEER) return null;
 
       entry = {
         fragmentCount: fragment.fragmentCount,
@@ -112,9 +111,8 @@ export class FragmentReassembler {
         peerId,
       };
       this.pending.set(key, entry);
-      this.peerPendingSets.set(peerId, peerSets + 1);
+      if (hasAuthenticatedPeer) this.peerPendingSets.set(peerId, peerSets + 1);
     } else if (entry.fragmentCount !== fragment.fragmentCount || entry.peerId !== peerId) {
-      // C10: the same message ID cannot be claimed by another peer.
       return null;
     }
 
@@ -122,12 +120,12 @@ export class FragmentReassembler {
 
     const peerBytes = this.peerPendingBytes.get(peerId) ?? 0;
     if (this.pendingBytes + fragment.data.length > MAX_PENDING_FRAGMENT_BYTES) return null;
-    if (peerBytes + fragment.data.length > MAX_PENDING_FRAGMENT_BYTES_PER_PEER) return null;
+    if (hasAuthenticatedPeer && peerBytes + fragment.data.length > MAX_PENDING_FRAGMENT_BYTES_PER_PEER) return null;
 
     entry.received.set(fragment.fragmentIndex, fragment.data);
     entry.bytes += fragment.data.length;
     this.pendingBytes += fragment.data.length;
-    this.peerPendingBytes.set(peerId, peerBytes + fragment.data.length);
+    if (hasAuthenticatedPeer) this.peerPendingBytes.set(peerId, peerBytes + fragment.data.length);
 
     if (entry.received.size < entry.fragmentCount) return null;
 
@@ -151,14 +149,16 @@ export class FragmentReassembler {
     this.pending.delete(key);
     this.pendingBytes -= entry.bytes;
 
-    const sets = this.peerPendingSets.get(entry.peerId) ?? 0;
-    if (sets <= 1) this.peerPendingSets.delete(entry.peerId);
-    else this.peerPendingSets.set(entry.peerId, sets - 1);
+    if (entry.peerId !== 'unknown') {
+      const sets = this.peerPendingSets.get(entry.peerId) ?? 0;
+      if (sets <= 1) this.peerPendingSets.delete(entry.peerId);
+      else this.peerPendingSets.set(entry.peerId, sets - 1);
 
-    const bytes = this.peerPendingBytes.get(entry.peerId) ?? 0;
-    const remaining = bytes - entry.bytes;
-    if (remaining <= 0) this.peerPendingBytes.delete(entry.peerId);
-    else this.peerPendingBytes.set(entry.peerId, remaining);
+      const bytes = this.peerPendingBytes.get(entry.peerId) ?? 0;
+      const remaining = bytes - entry.bytes;
+      if (remaining <= 0) this.peerPendingBytes.delete(entry.peerId);
+      else this.peerPendingBytes.set(entry.peerId, remaining);
+    }
   }
 
   purgeStale(maxAgeMs: number = DEFAULT_FRAGMENT_MAX_AGE_MS): number {
