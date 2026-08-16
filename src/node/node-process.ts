@@ -1,0 +1,97 @@
+import * as readline from 'node:readline';
+import { ed25519 } from '@noble/curves/ed25519.js';
+import { createUdpTransport, type UdpTransport } from '../transport/udp';
+import { RelayNode } from '../routing/routing';
+import { openDataEnvelope, decodeEnvelope } from '../envelope/envelope';
+import type { Identity } from '../identity/identity';
+
+interface PeerConfig { id: string; host: string; port: number; publicKey: string; }
+interface SessionConfig { id: string; peerId: string; sessionId: string; sendKey: string; receiveKey: string; }
+interface NodeConfig { id: string; privateKey: string; port?: number; host?: string; peers?: PeerConfig[]; sessions?: SessionConfig[]; }
+
+type Command =
+  | { op: 'add-peer'; peer: PeerConfig }
+  | { op: 'auth-peer'; peerId: string; publicKey: string }
+  | { op: 'advertise'; fromPeerId: string; advertisement: unknown }
+  | { op: 'send-envelope'; envelope: string }
+  | { op: 'shutdown' };
+
+const bytes = (hex: string): Uint8Array => Uint8Array.from(Buffer.from(hex, 'hex'));
+const hex = (value: Uint8Array): string => Buffer.from(value).toString('hex');
+const emit = (event: Record<string, unknown>): void => process.stdout.write(`${JSON.stringify(event)}\n`);
+
+async function main(): Promise<void> {
+  const raw = process.env.ZAYCOMM_NODE_CONFIG;
+  if (!raw) throw new Error('ZAYCOMM_NODE_CONFIG_REQUIRED');
+  const config = JSON.parse(raw) as NodeConfig;
+  const privateKey = bytes(config.privateKey);
+  const identity: Identity = { privateKey, publicKey: ed25519.getPublicKey(privateKey) };
+  const transport = createUdpTransport(config.id, { host: config.host ?? '127.0.0.1', port: config.port ?? 0 });
+  await transport.ready();
+  const node = new RelayNode(config.id, identity, transport);
+
+  const configurePeer = (peer: PeerConfig): void => {
+    transport.addPeer(peer.id, { host: peer.host, port: peer.port });
+    node.registerAuthenticatedPeer(peer.id, bytes(peer.publicKey));
+  };
+  for (const peer of config.peers ?? []) configurePeer(peer);
+  for (const session of config.sessions ?? []) {
+    node.registerAuthenticatedSession(session.peerId, bytes(session.peerId === session.id ? session.peerId : (config.peers ?? []).find((p) => p.id === session.peerId)?.publicKey ?? ''), {
+      sessionId: session.sessionId,
+      sendKey: bytes(session.sendKey),
+      receiveKey: bytes(session.receiveKey),
+    });
+  }
+
+  node.onDelivered((envelope) => {
+    try {
+      const opened = openDataEnvelope(envelope);
+      emit({ event: 'delivered', messageId: hex(envelope.header.messageId), plaintext: new TextDecoder().decode(opened.ciphertext) });
+      node.sendAck(envelope.header.sourceHint, envelope.header.messageId);
+    } catch {
+      emit({ event: 'delivered', messageId: hex(envelope.header.messageId) });
+    }
+  });
+  node.onAckReceived((messageId) => emit({ event: 'ack', messageId: hex(messageId) }));
+
+  emit({ event: 'ready', id: config.id, host: transport.address.host, port: transport.address.port, publicKey: hex(identity.publicKey) });
+
+  const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  const shutdown = async (): Promise<void> => { rl.close(); await transport.close(); process.exit(0); };
+  rl.on('line', (line) => {
+    void (async () => {
+      try {
+        const command = JSON.parse(line) as Command;
+        switch (command.op) {
+          case 'add-peer':
+            configurePeer(command.peer);
+            emit({ event: 'peer-added', peerId: command.peer.id });
+            break;
+          case 'auth-peer':
+            node.registerAuthenticatedPeer(command.peerId, bytes(command.publicKey));
+            emit({ event: 'peer-authenticated', peerId: command.peerId });
+            break;
+          case 'advertise':
+            node.receiveAdvertisement(command.fromPeerId, command.advertisement as Parameters<RelayNode['receiveAdvertisement']>[1]);
+            emit({ event: 'advertisement-processed', fromPeerId: command.fromPeerId });
+            break;
+          case 'send-envelope': {
+            const result = node.sendEnvelope(decodeEnvelope(bytes(command.envelope)));
+            emit({ event: 'send-result', result });
+            break;
+          }
+          case 'shutdown':
+            await shutdown();
+            break;
+        }
+      } catch (error) {
+        emit({ event: 'error', error: error instanceof Error ? error.message : String(error) });
+      }
+    })();
+  });
+
+  process.once('SIGTERM', () => { void shutdown(); });
+  process.once('SIGINT', () => { void shutdown(); });
+}
+
+void main().catch((error) => { emit({ event: 'fatal', error: error instanceof Error ? error.message : String(error) }); process.exit(1); });
