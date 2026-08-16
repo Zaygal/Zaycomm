@@ -48,7 +48,8 @@ describe('C20 concurrency / state-race campaign', () => {
   it('keeps identity-scoped concurrent operations independent', async () => {
     const identities = Array.from({ length: 8 }, () => createIdentity());
     const keys = await Promise.all(identities.map(identity => Promise.resolve(identity.publicKey)));
-    expect(new Set(keys.map(key => Buffer.from(key).toString('hex')).size)).toBe(8);
+    const uniqueKeys = new Set(keys.map(key => Buffer.from(key).toString('hex')));
+    expect(uniqueKeys.size).toBe(8);
   });
 
   it('remains stable when concurrent workloads finish in different orders', async () => {
