@@ -1,12 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { Encoder } from 'cbor-x';
 import { createIdentity } from '../src/identity/identity';
 import { createSyncEnvelope, createBroadcastEnvelope, decodeEnvelope } from '../src/envelope/envelope';
 import { RelayNode, computeDestinationHint, createRoutingAdvertisement } from '../src/routing/routing';
 import { createInternetTransport, type SimulatedTransport } from '../src/transport/transport';
 import { createBroadcastMessage, encodeBroadcastMessage } from '../src/broadcast/broadcast';
-
-const cbor = new Encoder();
 
 const SESSION_ID = 'c17-replay-session';
 const SEND_KEY = new Uint8Array(32).fill(51);
@@ -26,16 +23,16 @@ function connectSession(a: RelayNode, b: RelayNode): void {
   });
 }
 
-function captureSync(a: RelayNode): Uint8Array {
+function captureSync(a: RelayNode, neighborId: string): Uint8Array {
   let captured: Uint8Array | null = null;
   const transport = a.transport as SimulatedTransport;
   const originalSend = transport.send.bind(transport);
-  transport.send = (neighborId: string, frame: Uint8Array) => {
-    if (frame[0] === 0) captured = Uint8Array.from(frame);
-    return originalSend(neighborId, frame);
+  transport.send = (targetNeighborId: string, frame: Uint8Array) => {
+    if (targetNeighborId === neighborId && frame[0] === 0) captured = Uint8Array.from(frame);
+    return originalSend(targetNeighborId, frame);
   };
   try {
-    expect(a.initiateSync('b')).toBe(true);
+    expect(a.initiateSync(neighborId)).toBe(true);
   } finally {
     transport.send = originalSend;
   }
@@ -48,7 +45,7 @@ describe('C17 replay campaign', () => {
     const a = new RelayNode('a', createIdentity(), createInternetTransport('a'));
     const b = new RelayNode('b', createIdentity(), createInternetTransport('b'));
     connectSession(a, b);
-    const envelope = captureSync(a);
+    const envelope = captureSync(a, 'b');
 
     expect(b.receiveEnvelope(envelope, 'a')).toEqual({ outcome: 'dropped', reason: 'sync packet replayed' });
   });
@@ -57,7 +54,7 @@ describe('C17 replay campaign', () => {
     const a = new RelayNode('a', createIdentity(), createInternetTransport('a'));
     const b = new RelayNode('b', createIdentity(), createInternetTransport('b'));
     connectSession(a, b);
-    const envelope = captureSync(a);
+    const envelope = captureSync(a, 'b');
 
     b.unregisterAuthenticatedPeer('a');
     b.registerAuthenticatedSession('a', a.identity.publicKey, {
@@ -91,11 +88,7 @@ describe('C17 replay campaign', () => {
       receiveKey: RECEIVE_KEY,
     });
 
-    const envelope = captureSync(n1 as RelayNode & { id: string });
-    // captureSync targets the conventional neighbor name "b", so produce the
-    // same encrypted packet directly by initiating against a temporary id.
-    // The captured packet is independent of the transport path and can be
-    // replayed through n2 after the first delivery.
+    const envelope = captureSync(n1, 'relay');
     expect(relay.receiveEnvelope(envelope, 'n1').outcome).toBe('delivered');
     expect(relay.receiveEnvelope(envelope, 'n2')).toEqual({ outcome: 'dropped', reason: 'sync packet replayed' });
   });
@@ -104,7 +97,7 @@ describe('C17 replay campaign', () => {
     const a = new RelayNode('a', createIdentity(), createInternetTransport('a'));
     const b = new RelayNode('b', createIdentity(), createInternetTransport('b'));
     connectSession(a, b);
-    const envelope = captureSync(a);
+    const envelope = captureSync(a, 'b');
 
     expect(b.purgeStaleSyncReplayRecords(-1)).toBe(1);
     expect(b.receiveEnvelope(envelope, 'a').outcome).toBe('delivered');
