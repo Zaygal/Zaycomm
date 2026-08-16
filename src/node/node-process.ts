@@ -41,20 +41,29 @@ async function main(): Promise<void> {
   const transport = createUdpTransport(config.id, { host: config.host ?? '127.0.0.1', port: config.port ?? 0 });
   await transport.ready();
   const node = new RelayNode(config.id, identity, transport);
+  const pendingSessions = new Map<string, SessionConfig>();
 
-  const configurePeer = (peer: PeerConfig): void => {
-    transport.addPeer(peer.id, { host: peer.host, port: peer.port });
-    node.registerAuthenticatedPeer(peer.id, bytes(peer.publicKey));
-  };
-  for (const peer of config.peers ?? []) configurePeer(peer);
-  for (const session of config.sessions ?? []) {
-    const peer = (config.peers ?? []).find((candidate) => candidate.id === session.peerId);
-    if (!peer) throw new Error(`SESSION_PEER_NOT_FOUND:${session.peerId}`);
+  const registerSession = (session: SessionConfig, peer: PeerConfig): void => {
     node.registerAuthenticatedSession(session.peerId, bytes(peer.publicKey), {
       sessionId: session.sessionId,
       sendKey: bytes(session.sendKey),
       receiveKey: bytes(session.receiveKey),
     });
+    pendingSessions.delete(session.peerId);
+  };
+
+  const configurePeer = (peer: PeerConfig): void => {
+    transport.addPeer(peer.id, { host: peer.host, port: peer.port });
+    node.registerAuthenticatedPeer(peer.id, bytes(peer.publicKey));
+    const pending = pendingSessions.get(peer.id);
+    if (pending) registerSession(pending, peer);
+  };
+
+  for (const peer of config.peers ?? []) configurePeer(peer);
+  for (const session of config.sessions ?? []) {
+    const peer = (config.peers ?? []).find((candidate) => candidate.id === session.peerId);
+    if (peer) registerSession(session, peer);
+    else pendingSessions.set(session.peerId, session);
   }
 
   node.onDelivered((envelope) => {
