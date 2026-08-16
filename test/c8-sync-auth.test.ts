@@ -25,10 +25,8 @@ describe('C8 store-forward sync authorization', () => {
     const a = new RelayNode('a', createIdentity(), createInternetTransport('a'));
     const b = new RelayNode('b', createIdentity(), createInternetTransport('b'));
     connectTransportOnly(a, b);
-
     const envelope = createSyncEnvelope(makeSignedSync(a.identity, [0, []]));
     const result = b.receiveEnvelope(envelope, 'a');
-
     expect(result.outcome).toBe('dropped');
     expect(b.queueSize()).toBe(0);
   });
@@ -38,11 +36,9 @@ describe('C8 store-forward sync authorization', () => {
     const attacker = createIdentity();
     const b = new RelayNode('b', createIdentity(), createInternetTransport('b'));
     connectTransportOnly(a, b);
-    b.registerAuthenticatedPeer('a', a.identity.publicKey);
-
+    b.registerAuthenticatedPeer('a', a.identity.publicKey, { sessionId: 'session-a', sendKey: new Uint8Array(32).fill(1), receiveKey: new Uint8Array(32).fill(2) });
     const forged = createSyncEnvelope(makeSignedSync(attacker, [0, []]));
     const result = b.receiveEnvelope(forged, 'a');
-
     expect(result.outcome).toBe('dropped');
     expect(b.queueSize()).toBe(0);
   });
@@ -51,18 +47,16 @@ describe('C8 store-forward sync authorization', () => {
     const a = new RelayNode('a', createIdentity(), createInternetTransport('a'));
     const b = new RelayNode('b', createIdentity(), createInternetTransport('b'));
     connectTransportOnly(a, b);
-
     expect(a.initiateSync('b')).toBe(false);
   });
 
-  it('accepts a correctly signed sync only when the sender identity is registered for that neighbor', () => {
+  it('rejects the legacy signed-only sync format even when the sender identity is authenticated', () => {
     const a = new RelayNode('a', createIdentity(), createInternetTransport('a'));
     const b = new RelayNode('b', createIdentity(), createInternetTransport('b'));
     connectTransportOnly(a, b);
-    b.registerAuthenticatedPeer('a', a.identity.publicKey);
-
+    b.registerAuthenticatedPeer('a', a.identity.publicKey, { sessionId: 'session-a', sendKey: new Uint8Array(32).fill(1), receiveKey: new Uint8Array(32).fill(2) });
     const result = b.receiveEnvelope(createSyncEnvelope(makeSignedSync(a.identity, [0, []])), 'a');
-
-    expect(result.outcome).toBe('delivered');
+    expect(result.outcome).toBe('dropped');
+    expect(b.queueSize()).toBe(0);
   });
 });
