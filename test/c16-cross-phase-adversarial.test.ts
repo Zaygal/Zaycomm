@@ -10,7 +10,6 @@ import { FragmentReassembler } from '../src/envelope/fragment';
 import { encryptSyncPayload, decryptSyncPayload } from '../src/sync/session-sync';
 
 const hint = (seed: number) => new Uint8Array(8).fill(seed);
-
 const sessionKey = (seed: number) => new Uint8Array(32).fill(seed);
 
 describe('C16 cross-phase adversarial campaign', () => {
@@ -38,7 +37,7 @@ describe('C16 cross-phase adversarial campaign', () => {
       }, peer);
     }
 
-    expect(reassembler.pendingCount).toBeLessThanOrEqual(16);
+    expect(reassembler.pendingCount()).toBeLessThanOrEqual(16);
   });
 
   it('C7 + C9: replayed advertisement provenance cannot become a different route', () => {
@@ -76,7 +75,7 @@ describe('C16 cross-phase adversarial campaign', () => {
       }, peer);
     }
 
-    expect(reassembler.pendingCount).toBeLessThanOrEqual(16);
+    expect(reassembler.pendingCount()).toBeLessThanOrEqual(16);
   });
 
   it('C9 + C11: route abuse does not grant unlimited broadcast creation', () => {
