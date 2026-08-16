@@ -45,6 +45,8 @@ describe('C7 routing advertisement freshness and replay resistance', () => {
 
   it('deduplicates a replayed advertisement from the same neighbor', () => {
     const relay = new RelayNode('relay', createIdentity(), createBluetoothTransport('relay'));
+    const neighbor = createIdentity();
+    relay.registerAuthenticatedPeer('neighbor-a', neighbor.publicKey);
     const destination = createIdentity();
     const hint = computeDestinationHint(destination.publicKey);
     const ad = createRoutingAdvertisement(destination, [hint]);
@@ -57,6 +59,10 @@ describe('C7 routing advertisement freshness and replay resistance', () => {
 
   it('keeps the same advertisement usable through distinct neighbors', () => {
     const relay = new RelayNode('relay', createIdentity(), createBluetoothTransport('relay'));
+    const neighborA = createIdentity();
+    const neighborB = createIdentity();
+    relay.registerAuthenticatedPeer('neighbor-a', neighborA.publicKey);
+    relay.registerAuthenticatedPeer('neighbor-b', neighborB.publicKey);
     const destination = createIdentity();
     const hint = computeDestinationHint(destination.publicKey);
     const ad = createRoutingAdvertisement(destination, [hint]);
