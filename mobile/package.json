@@ -1,0 +1,15 @@
+{
+  "name": "@zaycomm/mobile",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Zaycomm mobile runtime boundary; protocol core remains TypeScript.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@zaycomm/core": "file:.."
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}
