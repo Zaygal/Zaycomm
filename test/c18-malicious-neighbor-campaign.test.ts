@@ -59,7 +59,7 @@ describe('C18 malicious-neighbor campaign', () => {
     connect(relay, attacker);
 
     const result = relay.receiveEnvelope(createSyncEnvelope(text('unauthorized sync')), 'attacker');
-    expect(result).toEqual({ outcome: 'dropped', reason: 'unauthenticated sync peer' });
+    expect(result).toEqual({ outcome: 'dropped', reason: 'sync session unavailable' });
   });
 
   it('keeps malicious broadcast amplification bounded by the origin budget', () => {
