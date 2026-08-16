@@ -31,8 +31,8 @@ function buildThreeNodePath() {
   const aliceHint = computeDestinationHint(alice.identity.publicKey);
   const bobHint = computeDestinationHint(bob.identity.publicKey);
 
-  // A neighbor signs the reachability claim it presents to the next hop.
-  relay.receiveAdvertisement('bob', createRoutingAdvertisement(relay.identity, [bobHint]));
+  // Each hop authenticates the identity that directly advertised reachability.
+  relay.receiveAdvertisement('bob', createRoutingAdvertisement(bob.identity, [bobHint]));
   alice.receiveAdvertisement('relay', createRoutingAdvertisement(relay.identity, [bobHint]));
 
   relay.receiveAdvertisement('alice', createRoutingAdvertisement(alice.identity, [aliceHint]));
@@ -98,7 +98,6 @@ describe('C12/C14 real node communication', () => {
     connect(alice, relay);
     connect(relay, bob);
 
-    const aliceHint = computeDestinationHint(alice.identity.publicKey);
     const bobHint = computeDestinationHint(bob.identity.publicKey);
 
     const sessionId = 'c14-a-b';
@@ -138,6 +137,5 @@ describe('C12/C14 real node communication', () => {
     expect(alice.initiateSync('relay')).toBe(true);
     expect(deliveredAtBob).toBe(true);
     expect(alice.queueSize()).toBe(1);
-    expect(aliceHint).toHaveLength(8);
   });
 });
