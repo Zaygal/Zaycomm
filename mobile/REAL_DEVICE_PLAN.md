@@ -1,8 +1,6 @@
 # Zaycomm Real-Device Execution Plan
 
-## Current state
-
-The Zaycomm protocol core remains TypeScript.
+## Architecture
 
 ```text
 TypeScript protocol core
@@ -14,15 +12,7 @@ native platform bridge
 real radio hardware
 ```
 
-Both mobile adapters use the same Zaycomm BLE service and frame characteristic so an iPhone and Android phone can be part of the same BLE test.
-
-## Platform policy
-
-- iOS is a first-class physical target.
-- Android is a first-class physical target.
-- We do not require a Mac to continue protocol implementation or TypeScript/mobile-boundary testing.
-- A physical iOS build/install still requires an Apple-supported build/signing environment. If the user has no Mac, use a legitimate cloud/macOS build service or a GitHub-hosted macOS runner once the native app project is ready.
-- Do not claim a physical iOS test has passed until it has actually run on an iPhone.
+The mobile boundary moves opaque Zaycomm frames. Identity, authentication, encryption, routing, fragmentation/reassembly, ACK validation and store-forward remain in the TypeScript protocol core.
 
 ## BLE interoperability contract
 
@@ -30,70 +20,143 @@ Both platforms use:
 
 - Service: `8F4D0001-7E2C-4C7D-9F11-7A9D00000001`
 - Frame characteristic: `8F4D0002-7E2C-4C7D-9F11-7A9D00000001`
-- Configured protocol transport MTU: 200 bytes
+- Protocol transport ceiling: 200 bytes
 
-BLE advertisements contain only the public Zaycomm service. They do not expose protocol identity, public keys, routes, or encrypted application data.
+Native adapters must also respect the current physical write capacity. iOS CoreBluetooth reports that capacity through `maximumWriteValueLength`; the TypeScript iOS adapter uses the lower of the native capacity and 200 bytes.
 
-The platform UUID/address is only a transport peer handle. Zaycomm identity must be established and authenticated by the protocol layer.
+Advertisements expose only the public service. Platform UUID/address values are transport handles, never protocol identity.
 
-## C25 execution sequence
+---
 
-1. TypeScript mobile transport contract — implemented.
-2. Android BLE native bridge — implemented.
-3. iOS CoreBluetooth native bridge — implemented.
-4. Cross-platform BLE UUID/advertisement alignment — implemented.
-5. JS adapter tests — implemented.
-6. Run complete TypeScript suite in Codespaces.
-7. Prepare an actual mobile application shell around the node runtime.
-8. Build on an Apple/macOS environment without requiring the user's own Mac.
-9. Install the build on an iPhone and Android device.
-10. Disable Internet/cellular data for the first physical test.
-11. Advertise Zaycomm on both devices.
-12. Discover and connect.
-13. Send a real encrypted Zaycomm envelope over BLE.
-14. Verify recipient decryption and authenticated ACK.
-15. Repeat in the opposite direction.
+# C25 — Real Mobile Transport Foundation
 
-## Physical test matrix
+### C25.1 — TypeScript mobile boundary — IMPLEMENTED
 
-The same protocol must work across:
+- `mobile/src/transport.ts`
+- `mobile/src/androidBleTransport.ts`
+- `mobile/src/iosBleTransport.ts`
 
-| Sender | Relay/Receiver | Target |
-|---|---|---|
-| iPhone | Android | Android/iPhone |
-| Android | iPhone | iPhone/Android |
-| Android | Android | Android |
-| iPhone | iPhone | iPhone |
+The core remains TypeScript and never imports native Bluetooth APIs.
 
-A single successful two-device test is the first hardware proof. Cross-platform testing is then required to prove the transport contract is genuinely interoperable.
+### C25.2 — Android BLE bridge — IMPLEMENTED / HARDWARE VERIFICATION PENDING
 
-## What comes next
+`mobile/android/app/src/main/java/com/zaycomm/mobile/ZaycommBleModule.kt` provides scan, advertise, GATT service/characteristic registration, connection lifecycle, opaque frame writes/receives and notifications.
 
-After two-device BLE proof:
+### C25.3 — iOS CoreBluetooth bridge — IMPLEMENTED / HARDWARE VERIFICATION PENDING
 
-- C26: three+ physical nodes and multi-hop routing.
-- C27: store-and-forward with moving relay phones.
-- C28: opportunistic Internet gateway while preserving offline operation.
-- C29: real multi-transport node (BLE + Wi-Fi P2P where platform APIs permit + Internet).
-- C30: field campaign with movement, packet loss, restarts and connectivity changes.
-- Later: purpose-built long-range radio and legitimate satellite-capable gateways.
+`mobile/ios/ZaycommBleBridge.swift` provides:
 
-Cellular Internet is an online transport opportunity, not an offline radio. Satellite support requires compatible satellite hardware/service or an external gateway; it must never be assumed merely because a phone has satellite-related features.
+- CoreBluetooth scanning;
+- service-only advertising;
+- GATT service/characteristic creation;
+- central connections;
+- opaque frame writes;
+- notifications/subscriptions;
+- peripheral write reception;
+- connection lifecycle;
+- native write-capacity reporting.
 
-## Evidence rule
+The Swift bridge contains no Zaycomm protocol interpretation.
 
-Every physical milestone records:
+### C25.4 — Two-device physical proof — OPEN
 
-- exact device models;
-- OS versions;
-- transport used;
-- Internet state;
-- whether cellular data was disabled;
-- sender/receiver node IDs (protocol-level, not BLE address as identity);
-- message ID;
-- delivery result;
-- ACK result;
-- elapsed time;
-- failure/retry behavior.
+A real pair may be:
 
-`SIMULATED` and `REAL HARDWARE` must never be conflated.
+```text
+Android ↔ Android
+Android ↔ iPhone
+iPhone  ↔ iPhone
+```
+
+Acceptance:
+
+1. Install a real mobile node runtime on both devices.
+2. Give each node a persistent Zaycomm identity.
+3. Disable Internet and cellular data.
+4. Enable BLE.
+5. Discover and authenticate the peer at the protocol layer.
+6. Send a real encrypted envelope.
+7. Verify recipient decryption.
+8. Verify destination-authenticated ACK.
+9. Repeat in reverse.
+10. Restart one device and repeat after reconnection.
+
+**Codespace/vitest results do not count as C25.4 hardware evidence.**
+
+## Physical evidence record
+
+Record device model, OS version, build identifier, protocol node ID/fingerprint, transport, Internet/cellular state, message ID, delivery result, ACK result, elapsed time, retries/disconnects, restarts and relevant logs.
+
+`SIMULATED`, `OS-PROCESS`, and `REAL HARDWARE` are separate evidence classes.
+
+---
+
+# C26 — Real Multi-Node Mobile Mesh
+
+**Status: PREPARATION — starts after C25.4 hardware proof.**
+
+Goal: prove three physical phones form a relay network rather than only a direct two-device link.
+
+```text
+Alice                 Bob                  Charlie
+  ●  <──── BLE ────>   ●   <──── BLE ────>    ●
+                         relay
+```
+
+Alice and Charlie must have no usable direct path during the first test. Run a direct-path control before starting Bob, record the result, then place Bob so both adjacent links work.
+
+### C26 acceptance
+
+1. Three physical phones have independent persistent Zaycomm identities.
+2. Alice↔Charlie direct communication is unavailable at the chosen test positions.
+3. Alice↔Bob and Bob↔Charlie local links work.
+4. Alice sends an end-to-end encrypted message addressed to Charlie.
+5. Bob forwards only the opaque encrypted envelope.
+6. Charlie decrypts successfully.
+7. Charlie's authenticated/destination-signed ACK returns through Bob to Alice.
+8. Duplicate/replay protection remains active.
+9. Bob can disconnect/reconnect without corrupting protocol state.
+10. Charlie→Bob→Alice also succeeds.
+11. The experiment is repeated at a second physical placement.
+
+### C26 execution sequence
+
+**A — Direct-path control**
+
+- Internet and cellular data off on all phones.
+- Alice and Charlie at the selected separation.
+- Bob disabled.
+- Confirm no usable direct Zaycomm session forms.
+
+**B — Two-hop route**
+
+- Start Bob's node/relay transport.
+- Position Bob where Alice↔Bob and Bob↔Charlie are viable.
+- Authenticate adjacent peers.
+- Send a uniquely tagged Alice→Charlie message.
+- Verify Charlie decrypts it and ACK reaches Alice.
+
+**C — Reverse route**
+
+- Send Charlie→Alice through Bob.
+- Verify decryption and ACK.
+
+**D — Relay interruption**
+
+- Interrupt Bob during/after a queued delivery.
+- Restore Bob.
+- Verify delivery resumes without session/ratchet corruption.
+
+C26 proves physical multi-hop routing. It does not prove long-range radio, direct cellular transport, satellite, or Internet-gateway behavior.
+
+---
+
+# Following phases
+
+- **C27:** moving relay/store-and-forward with physically separated encounters.
+- **C28:** opportunistic Internet gateway while preserving offline delivery.
+- **C29:** real multi-transport node: BLE + supported Wi-Fi P2P + Internet.
+- **C30:** field campaign: movement, packet loss, restarts, repeated encounters, malicious neighbors and connectivity changes.
+- **C31+:** purpose-built long-range radio and legitimate satellite-capable gateways.
+
+Cellular Internet is an online transport opportunity, not an offline radio. A normal smartphone must not be assumed to provide arbitrary satellite packet transport.
