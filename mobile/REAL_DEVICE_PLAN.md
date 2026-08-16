@@ -5,7 +5,7 @@
 ```text
 TypeScript protocol core
         ↓
-mobile-compatible JS runtime
+React Native / mobile-compatible JS runtime
         ↓
 native platform bridge
         ↓
@@ -58,7 +58,19 @@ The core remains TypeScript and never imports native Bluetooth APIs.
 
 The Swift bridge contains no Zaycomm protocol interpretation.
 
-### C25.4 — Two-device physical proof — OPEN
+### C25.4-A — Mobile node shell — IMPLEMENTED / BUILD VERIFICATION PENDING
+
+The first user-facing mobile node shell is now in the repository:
+
+- `mobile/App.tsx` — node setup, BLE start, nearby-node discovery, connect action and transport log.
+- `mobile/index.js` — React Native application entry point.
+- `mobile/package.json` — React Native 0.86.x runtime dependencies.
+- `mobile/tsconfig.json` — mobile TypeScript configuration.
+- Android `ZaycommBlePackage.kt` registers the BLE native module.
+
+The UI deliberately does not implement protocol cryptography. It controls the native transport boundary and will be wired to the existing TypeScript node/session layer before the first end-to-end message test.
+
+### C25.4-B — Physical-device proof — OPEN
 
 A real pair may be:
 
@@ -70,18 +82,30 @@ iPhone  ↔ iPhone
 
 Acceptance:
 
-1. Install a real mobile node runtime on both devices.
-2. Give each node a persistent Zaycomm identity.
-3. Disable Internet and cellular data.
-4. Enable BLE.
-5. Discover and authenticate the peer at the protocol layer.
-6. Send a real encrypted envelope.
-7. Verify recipient decryption.
-8. Verify destination-authenticated ACK.
-9. Repeat in reverse.
-10. Restart one device and repeat after reconnection.
+1. Build and install a real mobile node runtime on both devices.
+2. Give each node a persistent Zaycomm identity using the existing identity implementation.
+3. Grant only the platform permissions required for BLE.
+4. Disable Internet and cellular data.
+5. Enable BLE.
+6. Discover the Zaycomm service on the peer.
+7. Establish/authenticate the Zaycomm session at the protocol layer.
+8. Send a real encrypted envelope.
+9. Verify recipient decryption.
+10. Verify destination-authenticated ACK.
+11. Repeat in reverse.
+12. Restart one device and repeat after reconnection.
 
-**Codespace/vitest results do not count as C25.4 hardware evidence.**
+**Codespace/Vitest results do not count as C25.4 hardware evidence.**
+
+### Current physical setup
+
+The repository is now prepared for a React Native mobile shell, but the current Codespace is not itself an iOS signing/build environment. iOS installation therefore requires an Apple-compatible build/signing path. Android can be built on a supported non-macOS environment.
+
+For Android 12+, the application must request `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`, and `BLUETOOTH_ADVERTISE` at runtime when those capabilities are used. The app does not derive physical location from BLE scanning, so the Android implementation can use the platform's `neverForLocation` assertion where appropriate. citeturn0search3
+
+For iOS, the app must provide the Core Bluetooth usage description in its Info.plist and use CoreBluetooth central/peripheral APIs for scanning, connections, advertising and GATT data transfer. citeturn0search0
+
+React Native 0.86 is the current stable release line as of this plan; the project deliberately pins the mobile runtime to the 0.86 line rather than tracking a nightly release. citeturn4search0turn4search5
 
 ## Physical evidence record
 
