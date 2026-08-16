@@ -107,7 +107,8 @@ class RoutingTable {
     nowMs: number = Date.now(),
   ): void {
     if (!verifyRoutingAdvertisement(ad, nowMs)) return;
-    if (!bytesEqual(ad.advertiserPublicKey, authenticatedPeerPublicKey)) return;
+    // A signed destination advertisement may legitimately be relayed by an authenticated neighbor.
+    // C12 binds destination signer and immediate relay neighbor separately at ACK validation time.
     if (!Number.isSafeInteger(sessionEpoch) || sessionEpoch < 0) return;
     for (const hint of ad.reachableDestinations) {
       const key = bytesToHex(hint);
@@ -325,7 +326,7 @@ export class RelayNode {
   receiveAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): void {
     const now = Date.now(); this.purgeStaleRoutingState(); if (!verifyRoutingAdvertisement(ad, now)) return;
     const peer = this.authenticatedPeers.get(fromNeighborId); if (!peer) return;
-    if (!bytesEqual(peer.identityPublicKey, ad.advertiserPublicKey)) return;
+    // The authenticated neighbor is the relay-path binding; it need not be the signer of a destination advertisement.
     const fingerprint = bytesToHex(sha256(concatBytes(ad.advertiserPublicKey, u64le(ad.timestamp), ...ad.reachableDestinations, ad.signature)));
     const replayKey = `${fromNeighborId}:${fingerprint}`;
     if (this.seenRoutingAdvertisements.has(replayKey)) return;
