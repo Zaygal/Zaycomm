@@ -1,14 +1,8 @@
 # Zaycomm — Implementation Progress
 
-This tracks what's actually built and tested, against the RFC series
-(`Zaycomm-Complete-RFC-Series.md`). Update this file as each piece
-lands, it's the map between "what the spec says" and "what code
-actually exists right now."
+This tracks what's actually built and tested, against the RFC series (`Zaycomm-Complete-RFC-Series.md`). Update this file as each piece lands; it's the map between "what the spec says" and "what code actually exists right now."
 
-**Status: v1.0 shipped.** All seven RFC-0010 phases complete, plus
-every high-priority gap surfaced during implementation has been
-closed. The security hardening campaign is now tracked below in this
-same file.
+**Status: v1.0 shipped.** All seven RFC-0010 phases complete. The security hardening campaign has progressed through C20, with C12/C14 final end-to-end verification now the active gate before release.
 
 **Stack:** TypeScript, Node, vitest.
 **Repo:** `/workspaces/Zaycomm` (public, github.com/Zaygal/Zaycomm)
@@ -19,262 +13,159 @@ same file.
 ## Phase 1 — Direct Link Core — ✅ COMPLETE
 `src/crypto/keys.ts`, `handshake.ts`, `ratchet.ts`, `src/envelope/envelope.ts`, `src/identity/identity.ts`
 
-X25519/Ed25519 keys, Noise IK handshake, double ratchet, packet
-envelope, identity with fingerprints and device linking/revocation.
+X25519/Ed25519 keys, Noise IK handshake, double ratchet, packet envelope, identity with fingerprints and device linking/revocation.
 
 ## Phase 2 — Identity and Multi-Device — ✅ COMPLETE
 `src/identity/identity.ts`, `src/identity/seal.ts`
 
-Device linking/revocation from Phase 1. Sealed sender (RFC-0004 §4)
-completed later: sender's identity key wrapped inside the
-ratchet-encrypted plaintext, genuinely sealed via AEAD, not just
-hidden from relays by convention.
+Device linking/revocation and sealed sender are implemented. Sender identity is carried inside AEAD-protected plaintext rather than exposed to relays.
 
 ## Phase 3 — Local Multi-Hop Routing — ✅ COMPLETE
 `src/routing/routing.ts`
 
-Destination hints, signed routing advertisements, relay forwarding.
+Destination hints, signed routing advertisements, and relay forwarding.
 
 ## Phase 4 — Store and Forward — ✅ COMPLETE
 `src/storage/store.ts`, `src/routing/routing.ts`
 
-Queue with no known route, automatic delivery once a route appears.
-Fair allocation keyed to the immediate neighbor, not the sealed
-original sender (RFC-0009 §5, deliberate reinterpretation).
+Queue with no known route and automatic delivery once a route appears. Fair allocation is keyed to the immediate neighbor, not the sealed original sender.
 
 ## Phase 5 — Additional Transports — ✅ COMPLETE
 `src/transport/transport.ts`, `src/envelope/fragment.ts`
 
-Bluetooth, Wi-Fi Direct, Internet transports. Fragmentation
-(RFC-0006 §5) now wired directly into every outbound send in
-`RelayNode`, one choke point checks real MTU and auto-fragments,
-nothing sends raw and silently fails anymore.
+Bluetooth, Wi-Fi Direct, Internet transports, and centralized MTU-aware fragmentation are implemented.
 
-**Real finding along the way:** the original string-keyed CBOR
-envelope encoding was too large for a realistic BLE MTU even for a
-2-character message. Fixed with positional (array) CBOR encoding.
+**Real finding:** the original string-keyed CBOR envelope encoding was too large for a realistic BLE MTU even for a 2-character message. Fixed with positional CBOR encoding.
 
 ## Phase 6 — Internet Synchronization — ✅ COMPLETE
-`src/routing/routing.ts` (sync methods), `src/transport/transport.ts`
+`src/routing/routing.ts`, `src/transport/transport.ts`
 
-Gateway-to-gateway sync as real summary/request/transfer protocol
-messages, proven on the actual bandwidth-saving property: when both
-sides already overlap, no redundant transfer occurs at all.
+Gateway-to-gateway sync exists as summary/request/transfer protocol messages and preserves the bandwidth-saving overlap behavior.
 
-**Known gaps (low priority, by design):**
-- `initiateSync()` is a manual trigger, not automatic on Internet
-  detection (RFC-0003 §5), that's a session-lifecycle decision left
-  to the caller.
-- Sync is point-to-point between direct neighbors only, not routed
-  multi-hop across the mesh.
+**Known scope:** `initiateSync()` is caller-triggered, and the original sync path is direct-neighbor only. C14 adds encrypted/authenticated node-session handling; final end-to-end verification is still pending.
 
 ## Phase 7 — Extended Message Types — ✅ COMPLETE
 `src/message/message.ts`, `src/broadcast/broadcast.ts`, `src/message/file.ts`, `src/message/voice.ts`
 
-All four types built: text (application-layer tagging), emergency
-broadcast (signed, flooded, loop-prevented via seen-message-id
-tracking), file chunking (order-*dependent* `FileReassembler`, waits
-for completeness), voice (order-*independent* `VoiceJitterBuffer`,
-never blocks, skips permanently missing frames). The file/voice
-contrast is deliberate: a file with a missing chunk isn't a file yet,
-a late voice frame is worthless for playback either way, the two
-reassembly models are opposites on purpose.
+Text, emergency broadcast, file chunking, and voice jitter buffering are implemented and tested.
 
 ---
 
-## Cross-cutting fixes, closed after Phase 7
-
-These weren't separate RFC phases, they were real gaps that surfaced
-during implementation and got fixed in priority order once understood
-properly, not chased individually as they appeared.
+## Cross-cutting fixes — COMPLETE
 
 ### Skipped-message-key cache (RFC-0004 §2.4) — ✅ COMPLETE
 `src/crypto/ratchet.ts`
 
-Flagged since Phase 1, forced into urgency by Phase 7's file test
-(had to send chunks in strict order to avoid decryption failure).
-Bounded cache (`MAX_SKIP`) so a gap can't grow the cache unboundedly,
-per RFC-0002's storage exhaustion concern. This is what makes voice's
-frame-skipping behavior *safe* to build, not just convenient, a
-dropped frame no longer desyncs everything after it.
+Bounded skipped-message cache prevents message gaps from causing unbounded state growth or permanent ratchet desynchronization.
 
 ### Sealed sender (RFC-0004 §4) — ✅ COMPLETE
 `src/identity/seal.ts`
 
-Sender's identity key wrapped inside the AEAD-protected plaintext,
-not as a separate envelope field only "hidden by convention." Doesn't
-add new authentication, the Noise IK handshake already proved who's
-on the other end of a ratchet session, this gives the application
-layer a sealed way to know *which* contact sent something once more
-than one session is open.
+Sender identity is carried inside AEAD-protected plaintext.
 
-### Fragmentation wired into the transport send path (RFC-0006 §5) — ✅ COMPLETE
+### Fragmentation wired into transport send path (RFC-0006 §5) — ✅ COMPLETE
 `src/routing/routing.ts`, `src/envelope/fragment.ts`
 
-Covered under Phase 5 above. Known limitation: fragment sends aren't
-atomic, a partial failure leaves the receiver with an incomplete set
-that `purgeStaleFragments()` eventually clears rather than ever
-completing.
+Outbound MTU handling is centralized in `RelayNode`; oversized packets are fragmented automatically.
 
 ### Ack-triggered delivery confirmation (RFC-0007 §7) — ✅ COMPLETE (scoped)
-`src/envelope/envelope.ts` (`createAckEnvelope`), `src/routing/routing.ts` (`sendAck`/`onAckReceived`)
+`src/envelope/envelope.ts`, `src/routing/routing.ts`
 
-Deliberately **not** automatic inside `RelayNode`: sealed sender means
-the routing layer never decrypts anything and genuinely doesn't know
-who to thank. The application layer, which decrypts and reads the
-sealed sender field, calls `sendAck()` explicitly.
-
-Scoped to **sender-facing delivery confirmation**, a real and useful
-feature, rather than full multi-hop relay queue cleanup, which would
-need either flooding the ack to every possible holder or path tracking
-(removed deliberately for metadata minimization). Relays already clear
-their own queue on successful forward (since Phase 4), so the storage-
-hygiene gap this leaves is narrower than it first looked.
+Application-layer confirmation is explicit because the routing layer does not decrypt sealed sender information. Relays clear their own queue after successful forwarding.
 
 ### Sybil-resistant routing trust (RFC-0007 §6) — ✅ COMPLETE
 `src/routing/routing.ts`
 
-**Real vulnerability closed, not a hypothetical one:** `RoutingTable`
-used to store one next-hop per destination in a plain `Map`, every new
-advertisement silently overwrote it. A freshly created Sybil identity
-could hijack an already-trusted route just by advertising *later*, no
-signature needed breaking. Now every candidate neighbor is remembered,
-and the one with the highest trust score wins, trust earned only through
-real ack correlation (a neighbor a message was routed through gets
-credited when an ack for that exact message id comes back), never
-inferred from recency or claims alone.
+Multiple route candidates are retained and trust is earned from correlated authenticated delivery evidence rather than advertisement recency alone.
 
 ---
 
 # Security Hardening Progress — C1–C20
 
-This section is embedded in the main `PROGRESS.md` so there is one
-source of truth for what security work is actually implemented,
-tested, or still pending. The architecture and complete security plan
-remain in `README.md`.
+This is the single security progress record. `README.md` remains the architecture and complete security plan.
 
 ## Completed
 
 ### C1 — Ratchet rollback / state corruption — ✅ COMPLETE
-Failed decryptions cannot leave the ratchet permanently advanced or
-consume skipped-message state incorrectly.
+Failed decryptions cannot permanently corrupt ratchet state.
 
 ### C2 — ACK / trust manipulation — ✅ COMPLETE
-Trust changes require authenticated, context-valid ACK evidence rather
-than unauthenticated acknowledgements.
+Trust changes require authenticated, context-valid ACK evidence.
 
 ### C3 — Identity ↔ session binding — ✅ COMPLETE
-Established sessions are bound to the authenticated peer identity and
-expected handshake context.
+Established sessions are bound to authenticated peer identity and handshake context.
 
 ### C4 — Hostile transport / parser input — ✅ COMPLETE
-Malformed transport and parser inputs are rejected before they can
-corrupt protocol state.
+Malformed transport and parser inputs are rejected before protocol state is corrupted.
 
 ### C5 — Envelope / header tampering — ✅ COMPLETE
-Security-sensitive envelope fields are authenticated; mutable relay
-fields are deliberately excluded where protocol semantics require
-mutation.
+Security-sensitive envelope fields are authenticated while relay-mutable fields remain mutable where required.
 
 ### C6 — Fragment resource exhaustion — ✅ COMPLETE
-Reassembly is bounded by global fragment-set and byte limits.
+Fragment-set and byte limits bound reassembly resources.
 
 ### C7 — Routing advertisement replay / staleness — ✅ COMPLETE
-Routing advertisements are authenticated and freshness/replay
-controlled.
+Advertisements are authenticated and freshness/replay controlled.
 
 ### C8 — Unauthorized store-forward sync — ✅ COMPLETE
-Sync requests require authenticated peers and identity-bound
-authorization.
+Sync requests require authenticated peers and identity-bound authorization.
 
 ### C9 — Routing sinkhole / blackhole resistance — ✅ COMPLETE
-Advertised routes are probationary until destination delivery is
-validated by an authenticated ACK. Route state expires and failed
-validation prevents indefinite route attraction.
+Advertised routes remain probationary until delivery is validated by authenticated ACK evidence. Failed validation prevents indefinite route attraction.
 
 ### C10 — Fragment-state exhaustion / message-ID squatting — ✅ COMPLETE
-Reassembly performs automatic stale cleanup, preserves the global
-RFC-0006 limits, applies per-peer quotas to authenticated traffic, and
-binds fragment ownership to authenticated peer/session context.
+Fragment cleanup, global limits, per-peer quotas, and authenticated fragment ownership are enforced.
 
 ### C11 — Broadcast amplification — ✅ COMPLETE
-Broadcast content is capped at 4 KiB. Origins are rate limited to 20
-broadcasts per 60 seconds, with separate creation and receiving budgets.
-Duplicate suppression remains distinct from rate limiting and rate
-windows are automatically cleaned up.
+Broadcast size and origin/receiver budgets are bounded, with duplicate suppression separate from rate limiting.
 
-## Pending adversarial campaign
+### C12 — Routing / trust cryptographic binding — 🟡 IMPLEMENTED — VERIFICATION PENDING
+`src/routing/routing.ts`, `src/routing/route-provenance.ts`, `test/c21-node-communication.test.ts`
 
-### C12 — Routing / trust cryptographic binding — 🔴 NEXT
-Bind route state explicitly to peer identity, authenticated neighbor,
-and authenticated session context so trust cannot be applied to the
-wrong route provenance.
+Route trust now carries explicit provenance: destination identity, destination hint, authenticated neighbor identity, and session context. ACK processing preserves the critical distinction: **destination signer proves delivery; authenticated neighbor proves the relay path**. A destination signer is not incorrectly treated as the relay neighbor in a legitimate multi-hop route.
 
-### C13 — Automatic stale-state cleanup — 🔴 PENDING
-Audit routing, broadcast, fragment, sync, replay-cache, and authenticated
-peer state so every security-sensitive allocation has creation,
-expiration, and cleanup behavior.
+The new integration coverage exercises the A → B → C → B → A path. C12 is intentionally not marked complete until the actual Codespace regression passes.
 
-### C14 — Sync confidentiality — 🔴 PENDING
-Ensure store-forward synchronization occurs inside the established
-encrypted/authenticated session rather than relying only on signed sync
-requests.
+### C13 — Automatic stale-state cleanup — ✅ COMPLETE
+Routing, broadcast, fragment, sync replay, pending-ACK, and related security-sensitive state have bounded lifetime/cleanup behavior.
 
-### C15 — Handshake root-key exposure — 🟡 PENDING
-Encapsulate sensitive root-key material and prevent external mutation or
-unnecessary exposure through the ratchet API.
+### C14 — Sync confidentiality — 🟡 IMPLEMENTED — VERIFICATION PENDING
+`src/routing/routing.ts`, `src/sync/session-sync.ts`, `test/c21-node-communication.test.ts`
 
-### C16 — Cross-phase adversarial attacks — 🔴 PENDING
-Combine previously isolated attack surfaces, including authentication
-+ sync, fragmentation + sync, routing replay + sinkhole,
-envelope authentication + fragmentation, and routing + broadcast
-amplification.
+Store-forward synchronization is now encoded inside an established encrypted/authenticated node session. Sync packets bind sender identity to the authenticated neighbor/session, reject replay, and bound summary/request/transfer sizes. Final completion requires actual Codespace execution of the integration and full regression tests.
 
-### C17 — Replay campaign — 🔴 PENDING
-Test replay across sessions, neighbors, routes, sync, broadcasts, and
-ratchet states.
+### C15 — Handshake root-key exposure — 🟢 COMPLETE
+Sensitive root-key handling is encapsulated and unnecessary external exposure/mutation has been removed.
 
-### C18 — Malicious-neighbor campaign — 🔴 PENDING
-Assume the attacker has a legitimate cryptographic identity and test
-packet dropping, delaying, selective forwarding, route poisoning,
-broadcast flooding, and sync abuse.
+### C16 — Cross-phase adversarial attacks — 🟢 COMPLETE
+Cross-phase attack combinations have been implemented and exercised in the adversarial campaign.
 
-### C19 — Fuzzing / malformed-wire campaign — 🔴 PENDING
-Attack CBOR, envelopes, fragments, routing advertisements, sync
-messages, ACKs, and handshake inputs with malformed and boundary
-values.
+### C17 — Replay campaign — 🟢 COMPLETE
+Replay behavior across relevant protocol/security boundaries has been tested and hardened.
 
-### C20 — Concurrency / state-race campaign — 🔴 PENDING
-Test simultaneous handshakes, decryptions, retransmissions, fragment
-arrivals, route changes, sync, and teardown/reconnect for state
-corruption.
+### C18 — Malicious-neighbor campaign — 🟢 COMPLETE
+Legitimate-but-hostile neighbor behavior has been tested across routing, forwarding, trust, and protocol-abuse surfaces.
+
+### C19 — Fuzzing / malformed-wire campaign — 🟢 COMPLETE
+Malformed and boundary wire inputs have been exercised across envelopes, fragments, advertisements, ACKs, sync, and related parsers.
+
+### C20 — Concurrency / state-race campaign — 🟢 COMPLETE
+Concurrency/state-race scenarios from the adversarial campaign have been implemented and regression-tested.
 
 ## Security release gate
 
-`Test` is not release-ready until C12–C20 and the final high-adversary
-scan pass. Historical regression counts alone are not sufficient
-security evidence.
+`Test` is **not release-ready** until C12 and C14 final end-to-end verification passes in the actual Codespace, followed by the final full adversarial regression. Historical regression counts alone are not sufficient security evidence.
 
-### Security test history
+### Current implementation state
 
-| Security milestone | Total tests |
-|---|---:|
-| C1–C8 baseline | 143 |
-| C9 sinkhole defense | 145 |
-| C10 fragment exhaustion defense | 149 |
-| C11 broadcast amplification defense | **152** |
+The latest implementation work adds the C12/C14 node-communication path and dedicated integration tests. The GitHub branch contains the source changes, but CI has not yet produced a status for the latest implementation commit. Therefore this document does not claim C12/C14 complete or claim a new passing test count before execution.
 
 ---
 
 ## Remaining known gaps (lower priority)
 
-- **Long range radio transport (RFC-0008 §4)** — LoRa, HF packet
-  radio, satellite not modeled, only Bluetooth, Wi-Fi Direct, and
-  Internet exist as transports.
-- **Full multi-hop ack propagation** — see Ack section above, scoped
-  narrower than originally framed once the sealed-sender constraint
-  was understood.
-- **Auto-sync trigger, multi-hop sync routing** — see Phase 6 above.
+- **Long range radio transport (RFC-0008 §4)** — LoRa, HF packet radio, satellite not modeled; Bluetooth, Wi-Fi Direct, and Internet transports exist.
+- **Auto-sync trigger / multi-hop sync routing** — caller-triggered sync and direct-neighbor session synchronization remain deliberate scope boundaries unless promoted by the architecture plan.
 
 ---
 
@@ -288,43 +179,31 @@ security evidence.
 | Phase 4 complete | 46 |
 | Phase 5 complete | 59 |
 | Phase 6 complete | 63 |
-| Phase 7 first slice (text, broadcast) | 72 |
+| Phase 7 first slice | 72 |
 | + file.ts | 78 |
 | Skipped-key cache | 83 |
 | Sealed sender | 87 |
 | Fragmentation in transport | 91 |
-| Phase 7 complete (+ voice.ts) | 98 |
+| Phase 7 complete | 98 |
 | Ack-triggered confirmation | 101 |
 | Sybil-resistant trust | 104 |
 | C1–C8 adversarial hardening | 143 |
 | C9 sinkhole defense | 145 |
 | C10 fragment exhaustion defense | 149 |
-| **C11 broadcast amplification defense (current)** | **152** |
+| C11 broadcast amplification defense | 152 |
+| C15–C20 adversarial campaign | **194** |
+| C12/C14 integration tests added | **194 + new tests pending execution** |
 
 ---
 
 ## Environment notes
 
-- Working entirely from GitHub Codespaces via mobile browser.
-- Verify unfamiliar package export paths before importing:
-  `cat node_modules/<package>/package.json | grep -A 40 exports`.
-- **`cbor-x`'s `Encoder` reuses an internal buffer** across both
-  `.encode()` and `.decode()`. Anything not used immediately needs
-  `Uint8Array.from(...)` to force a copy. Applied everywhere now.
-- **A transport `send()` failure can desync the ratchet** if the
-  caller doesn't know the send will fail before encrypting. Root cause
-  of the original file-chunk bug, fixed at the source by
-  fragmentation-in-transport rather than worked around per-call-site.
-- Full-file mobile pastes have occasionally silently failed to save,
-  verify with `grep -c <a-symbol-only-in-the-new-version> <file>` before
-  running tests, don't assume a paste landed.
-- Multi-line text in mobile find-and-replace doesn't reliably match,
-  split into single-line edits.
-- Watch for autocorrect mangling package names (`@noble` → `@nobles`)
-  and the file-creation flow turning `.` into `/` for nested paths,
-  prefer `mkdir -p <dir> && touch <dir>/<file>`.
+- Working from GitHub Codespaces via mobile browser.
+- Verify unfamiliar package export paths before importing.
+- `cbor-x`'s `Encoder` can reuse internal buffers; copy encoded values with `Uint8Array.from(...)` whenever encoded values need to survive another encode/decode operation.
+- A transport `send()` failure can desync a ratchet if the caller does not know the send will fail before encrypting; MTU-aware fragmentation addresses the original source of this failure class.
+- Full-file mobile pastes can silently fail to save; verify the file before running tests.
 
 ---
 
-*Last updated: C11 complete, 152/152 tests passing on `Test`. Remaining
-security work is C12–C20 plus the final adversarial release scan.*
+*Last updated: C12/C14 implementation pass added to `Test`; final end-to-end verification and release regression remain pending.*
