@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Zaycomm uses Bluetooth to exchange encrypted messages with nearby devices without Internet access.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Zaycomm uses Bluetooth to make this device available as an offline relay.</string>
+</dict>
+</plist>
