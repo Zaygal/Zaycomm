@@ -10,8 +10,22 @@ const text = (s: string) => new TextEncoder().encode(s);
 
 function connectNodes(a: RelayNode, b: RelayNode): void {
   (a.transport as SimulatedTransport).connectPeer(b.transport as SimulatedTransport);
-  a.registerAuthenticatedPeer(b.id, b.identity.publicKey);
-  b.registerAuthenticatedPeer(a.id, a.identity.publicKey);
+
+  // C14: production sync is carried only inside an authenticated encrypted
+  // node-to-node session. Use deterministic test keys with opposite send /
+  // receive directions to model the established session contract.
+  const aSend = new Uint8Array(32).fill(41);
+  const aReceive = new Uint8Array(32).fill(42);
+  a.registerAuthenticatedSession(b.id, b.identity.publicKey, {
+    sessionId: 'sync-test-session',
+    sendKey: aSend,
+    receiveKey: aReceive,
+  });
+  b.registerAuthenticatedSession(a.id, a.identity.publicKey, {
+    sessionId: 'sync-test-session',
+    sendKey: aReceive,
+    receiveKey: aSend,
+  });
 }
 
 function makeEnvelope(seed: number) {
