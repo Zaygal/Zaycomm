@@ -89,6 +89,18 @@ async function waitFor(node: NodeHandle, predicate: (events: NodeEvent[]) => boo
   }
 }
 
+async function waitForQueueSize(node: NodeHandle, expected: number, timeoutMs = 4000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const statusEvents = node.events.filter((event) => event.event === 'status');
+    const latest = statusEvents.at(-1);
+    if (latest && Number(latest.queueSize) === expected) return;
+    command(node, { op: 'status' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`NODE_PROCESS_QUEUE_TIMEOUT:${node.events.filter((event) => event.event === 'status').map((event) => String(event.queueSize)).join(',')}`);
+}
+
 async function stop(node: NodeHandle): Promise<void> {
   if (node.child.exitCode !== null) return;
   command(node, { op: 'shutdown' });
@@ -126,10 +138,13 @@ describe('C24 independent node encrypted sync', () => {
       command(alice, { op: 'initiate-sync', peerId: 'relay' });
       await waitFor(alice, (events) => events.some((event) => event.event === 'sync-result' && event.initiated === true));
 
-      command(relay, { op: 'status' });
-      await waitFor(relay, (events) => events.some((event) => event.event === 'status' && event.queueSize === 1));
+      // Sync is asynchronous: the relay may report queueSize=0 before it has
+      // received Alice's encrypted summary, requested the missing envelope,
+      // and received the encrypted transfer. Poll status instead of making the
+      // test depend on a single timing-sensitive snapshot.
+      await waitForQueueSize(relay, 1);
 
-      expect(relay.events.some((event) => event.event === 'status' && event.queueSize === 1)).toBe(true);
+      expect(relay.events.some((event) => event.event === 'status' && Number(event.queueSize) === 1)).toBe(true);
       expect(alice.events.some((event) => event.event === 'error' || event.event === 'fatal')).toBe(false);
       expect(relay.events.some((event) => event.event === 'error' || event.event === 'fatal')).toBe(false);
     } finally {
