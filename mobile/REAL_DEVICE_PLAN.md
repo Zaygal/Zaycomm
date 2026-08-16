@@ -101,11 +101,11 @@ Acceptance:
 
 The repository is now prepared for a React Native mobile shell, but the current Codespace is not itself an iOS signing/build environment. iOS installation therefore requires an Apple-compatible build/signing path. Android can be built on a supported non-macOS environment.
 
-For Android 12+, the application must request `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`, and `BLUETOOTH_ADVERTISE` at runtime when those capabilities are used. The app does not derive physical location from BLE scanning, so the Android implementation can use the platform's `neverForLocation` assertion where appropriate. citeturn0search3
+For Android 12+, the application must request `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`, and `BLUETOOTH_ADVERTISE` at runtime when those capabilities are used. The app does not derive physical location from BLE scanning, so the Android implementation can use the platform's `neverForLocation` assertion where appropriate.
 
-For iOS, the app must provide the Core Bluetooth usage description in its Info.plist and use CoreBluetooth central/peripheral APIs for scanning, connections, advertising and GATT data transfer. citeturn0search0
+For iOS, the app must provide the Core Bluetooth usage description in its Info.plist and use CoreBluetooth central/peripheral APIs for scanning, connections, advertising and GATT data transfer.
 
-React Native 0.86 is the current stable release line as of this plan; the project deliberately pins the mobile runtime to the 0.86 line rather than tracking a nightly release. citeturn4search0turn4search5
+React Native 0.86 is the current stable release line as of this plan; the project deliberately pins the mobile runtime to the 0.86 line rather than tracking a nightly release.
 
 ## Physical evidence record
 
