@@ -24,6 +24,11 @@ const decode = (b: Uint8Array) => new TextDecoder().decode(b);
 
 function connectNodes(a: RelayNode, b: RelayNode): void {
   (a.transport as SimulatedTransport).connectPeer(b.transport as SimulatedTransport);
+  // C10: transport receivers must authenticate the direct peer before
+  // allocating fragment/reassembly state. Real node links therefore have
+  // an identity binding in both directions.
+  a.registerAuthenticatedPeer(b.id, b.identity.publicKey);
+  b.registerAuthenticatedPeer(a.id, a.identity.publicKey);
 }
 
 describe('Routing advertisements (RFC-0007 Section 5)', () => {
