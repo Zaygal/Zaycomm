@@ -23,6 +23,9 @@ import {
 
 function connectNodes(a: RelayNode, b: RelayNode): void {
   (a.transport as SimulatedTransport).connectPeer(b.transport as SimulatedTransport);
+  // C10: fragmented transport delivery requires an authenticated direct peer.
+  a.registerAuthenticatedPeer(b.id, b.identity.publicKey);
+  b.registerAuthenticatedPeer(a.id, a.identity.publicKey);
 }
 
 function makeFrame(callId: Uint8Array, seq: number): VoiceFrame {
