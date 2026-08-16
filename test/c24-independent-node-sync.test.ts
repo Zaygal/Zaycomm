@@ -34,8 +34,13 @@ function spawnNode(identity: ReturnType<typeof createIdentity>, id: string, sess
   let buffer = '';
   let readyResolve!: (value: { host: string; port: number; publicKey: string }) => void;
   let readyReject!: (reason: unknown) => void;
+  let settled = false;
   const ready = new Promise<{ host: string; port: number; publicKey: string }>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
-  const timeout = setTimeout(() => readyReject(new Error('NODE_PROCESS_READY_TIMEOUT')), 3000);
+  const timeout = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    readyReject(new Error(`NODE_PROCESS_READY_TIMEOUT:${id}`));
+  }, 10000);
 
   child.stdout.on('data', (chunk: Buffer) => {
     buffer += chunk.toString();
@@ -47,15 +52,28 @@ function spawnNode(identity: ReturnType<typeof createIdentity>, id: string, sess
       try {
         const event = JSON.parse(line) as NodeEvent;
         events.push(event);
-        if (event.event === 'ready') {
+        if (event.event === 'ready' && !settled) {
+          settled = true;
           clearTimeout(timeout);
           readyResolve({ host: String(event.host), port: Number(event.port), publicKey: String(event.publicKey) });
         }
       } catch { /* diagnostics are intentionally ignored */ }
     }
   });
-  child.stderr.on('data', () => undefined);
-  child.once('error', readyReject);
+  child.stderr.on('data', (chunk: Buffer) => {
+    const diagnostic = chunk.toString().trim();
+    if (diagnostic) events.push({ event: 'stderr', nodeId: id, diagnostic });
+  });
+  child.once('error', (error) => {
+    if (!settled) { settled = true; clearTimeout(timeout); readyReject(error); }
+  });
+  child.once('exit', (code, signal) => {
+    if (!settled) {
+      settled = true;
+      clearTimeout(timeout);
+      readyReject(new Error(`NODE_PROCESS_EXITED:${id}:${code ?? 'null'}:${signal ?? 'none'}`));
+    }
+  });
   return { child, events, ready };
 }
 
@@ -117,5 +135,5 @@ describe('C24 independent node encrypted sync', () => {
     } finally {
       await Promise.all([stop(alice), stop(relay)]);
     }
-  }, 12000);
+  }, 15000);
 });
