@@ -45,6 +45,13 @@ const MAX_SYNC_TRANSFER_BYTES = 512 * 1024;
 const FRAME_KIND_ENVELOPE = 0;
 const FRAME_KIND_FRAGMENT = 1;
 
+// C9: a newly advertised route is usable only during a short probation window.
+// A destination-signed ACK promotes the route to validated status. Validated routes
+// also expire so stale or compromised paths cannot remain trusted indefinitely.
+export const ROUTE_PROBATION_MS = 30 * 1000;
+export const ROUTE_VALIDATION_TTL_MS = 5 * 60 * 1000;
+export const ROUTE_ACK_TIMEOUT_MS = ROUTE_PROBATION_MS;
+
 export function computeDestinationHint(publicKey: Uint8Array): Uint8Array {
   return sha256(publicKey).slice(0, DESTINATION_HINT_LENGTH);
 }
@@ -76,34 +83,85 @@ export function verifyRoutingAdvertisement(ad: RoutingAdvertisement, nowMs: numb
   return verifySignature(ad.signature, buildAdvertisementMessage(ad.reachableDestinations, ad.timestamp), ad.advertiserPublicKey);
 }
 
-class RoutingTable {
-  private routes = new Map<string, Map<string, number>>();
+type RouteCandidate = {
+  status: 'probation' | 'validated';
+  lastAdvertisedAt: number;
+  expiresAt: number;
+};
 
-  learnFromAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): void {
-    if (!verifyRoutingAdvertisement(ad)) return;
+class RoutingTable {
+  private routes = new Map<string, Map<string, RouteCandidate>>();
+
+  learnFromAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement, nowMs: number = Date.now()): void {
+    if (!verifyRoutingAdvertisement(ad, nowMs)) return;
     for (const hint of ad.reachableDestinations) {
       const key = bytesToHex(hint);
       let candidates = this.routes.get(key);
       if (!candidates) { candidates = new Map(); this.routes.set(key, candidates); }
-      candidates.set(fromNeighborId, Date.now());
+      const existing = candidates.get(fromNeighborId);
+      // A fresh advertisement never silently upgrades a route. Only a valid ACK can do that.
+      candidates.set(fromNeighborId, {
+        status: existing?.status === 'validated' && existing.expiresAt > nowMs ? 'validated' : 'probation',
+        lastAdvertisedAt: nowMs,
+        expiresAt: existing?.status === 'validated' && existing.expiresAt > nowMs
+          ? nowMs + ROUTE_VALIDATION_TTL_MS
+          : nowMs + ROUTE_PROBATION_MS,
+      });
     }
   }
 
-  lookup(destinationHint: Uint8Array, trustScores: Map<string, number>): string | null {
+  markValidated(destinationHint: Uint8Array, neighborId: string, nowMs: number = Date.now()): void {
+    const candidates = this.routes.get(bytesToHex(destinationHint));
+    const route = candidates?.get(neighborId);
+    if (!route) return;
+    route.status = 'validated';
+    route.lastAdvertisedAt = nowMs;
+    route.expiresAt = nowMs + ROUTE_VALIDATION_TTL_MS;
+  }
+
+  demote(destinationHint: Uint8Array, neighborId: string): void {
+    const candidates = this.routes.get(bytesToHex(destinationHint));
+    const route = candidates?.get(neighborId);
+    if (!route) return;
+    route.status = 'probation';
+    route.expiresAt = 0;
+  }
+
+  purgeExpired(nowMs: number = Date.now()): number {
+    let purged = 0;
+    for (const [destination, candidates] of this.routes) {
+      for (const [neighborId, route] of candidates) {
+        if (route.expiresAt <= nowMs) { candidates.delete(neighborId); purged++; }
+      }
+      if (candidates.size === 0) this.routes.delete(destination);
+    }
+    return purged;
+  }
+
+  lookup(destinationHint: Uint8Array, trustScores: Map<string, number>, nowMs: number = Date.now()): string | null {
+    this.purgeExpired(nowMs);
     const candidates = this.routes.get(bytesToHex(destinationHint));
     if (!candidates || candidates.size === 0) return null;
-    let best: string | null = null;
-    let bestScore = -Infinity;
-    for (const neighborId of candidates.keys()) {
+
+    let bestValidated: string | null = null;
+    let bestValidatedScore = -Infinity;
+    let bestProbation: string | null = null;
+    let bestProbationScore = -Infinity;
+
+    for (const [neighborId, route] of candidates) {
       const score = trustScores.get(neighborId) ?? 0;
-      if (score > bestScore) { bestScore = score; best = neighborId; }
+      if (route.status === 'validated') {
+        if (score > bestValidatedScore) { bestValidatedScore = score; bestValidated = neighborId; }
+      } else if (score > bestProbationScore) {
+        bestProbationScore = score;
+        bestProbation = neighborId;
+      }
     }
-    return best;
+    return bestValidated ?? bestProbation;
   }
 
-  hasRoute(destinationHint: Uint8Array): boolean {
-    const candidates = this.routes.get(bytesToHex(destinationHint));
-    return !!candidates && candidates.size > 0;
+  hasRoute(destinationHint: Uint8Array, nowMs: number = Date.now()): boolean {
+    return this.lookup(destinationHint, new Map(), nowMs) !== null;
   }
 }
 
@@ -117,7 +175,7 @@ export type DeliveryResult =
 type SyncSummaryEntry = [Uint8Array, number];
 type SyncPayloadTuple = [0, SyncSummaryEntry[]] | [1, Uint8Array[]] | [2, Uint8Array[]];
 type AuthenticatedSyncTuple = [Uint8Array, Uint8Array, Uint8Array];
-type PendingAck = { neighborId: string; destinationHint: Uint8Array };
+type PendingAck = { neighborId: string; destinationHint: Uint8Array; sentAt: number };
 type AuthenticatedPeer = { identityPublicKey: Uint8Array; establishedAt: number };
 
 function encodeAuthenticatedSync(identity: Identity, inner: SyncPayloadTuple): Uint8Array {
@@ -210,9 +268,30 @@ export class RelayNode {
     return purged;
   }
 
+  purgeStaleRoutes(): number {
+    return this.routingTable.purgeExpired(Date.now());
+  }
+
+  private expirePendingAcks(nowMs: number = Date.now()): number {
+    let expired = 0;
+    for (const [messageId, pending] of this.pendingAcks) {
+      if (nowMs - pending.sentAt < ROUTE_ACK_TIMEOUT_MS) continue;
+      this.pendingAcks.delete(messageId);
+      this.routingTable.demote(pending.destinationHint, pending.neighborId);
+      expired++;
+    }
+    return expired;
+  }
+
+  purgeStaleRoutingState(): number {
+    const now = Date.now();
+    return this.expirePendingAcks(now) + this.routingTable.purgeExpired(now);
+  }
+
   purgeStaleFragments(maxAgeMs: number): number { return this.reassembler.purgeStale(maxAgeMs); }
 
   sendAck(destinationHint: Uint8Array, acknowledgedMessageId: Uint8Array): void {
+    this.purgeStaleRoutingState();
     const ackEnvelope = createAckEnvelope(destinationHint, acknowledgedMessageId, this.identity);
     if (bytesEqual(destinationHint, this.ownDestinationHint)) { this.receiveEnvelope(ackEnvelope, null); return; }
     const nextHopId = this.routingTable.lookup(destinationHint, this.neighborTrust);
@@ -225,7 +304,7 @@ export class RelayNode {
       const oldestKey = this.pendingAcks.keys().next().value;
       if (oldestKey !== undefined) this.pendingAcks.delete(oldestKey);
     }
-    this.pendingAcks.set(bytesToHex(messageId), { neighborId, destinationHint: Uint8Array.from(destinationHint) });
+    this.pendingAcks.set(bytesToHex(messageId), { neighborId, destinationHint: Uint8Array.from(destinationHint), sentAt: Date.now() });
   }
 
   private sendEnvelopeOverTransport(neighborId: string, envelope: Envelope): boolean {
@@ -244,7 +323,9 @@ export class RelayNode {
   }
 
   receiveAdvertisement(fromNeighborId: string, ad: RoutingAdvertisement): void {
-    if (!verifyRoutingAdvertisement(ad)) return;
+    const now = Date.now();
+    this.purgeStaleRoutingState();
+    if (!verifyRoutingAdvertisement(ad, now)) return;
     const fingerprint = bytesToHex(sha256(concatBytes(ad.advertiserPublicKey, u64le(ad.timestamp), ...ad.reachableDestinations, ad.signature)));
     const replayKey = `${fromNeighborId}:${fingerprint}`;
     if (this.seenRoutingAdvertisements.has(replayKey)) return;
@@ -252,12 +333,13 @@ export class RelayNode {
       const oldestKey = this.seenRoutingAdvertisements.keys().next().value;
       if (oldestKey !== undefined) this.seenRoutingAdvertisements.delete(oldestKey);
     }
-    this.seenRoutingAdvertisements.set(replayKey, Date.now());
-    this.routingTable.learnFromAdvertisement(fromNeighborId, ad);
+    this.seenRoutingAdvertisements.set(replayKey, now);
+    this.routingTable.learnFromAdvertisement(fromNeighborId, ad, now);
     for (const hint of ad.reachableDestinations) this.attemptQueuedDelivery(hint);
   }
 
   private attemptQueuedDelivery(destinationHint: Uint8Array): void {
+    this.purgeStaleRoutingState();
     const nextHopId = this.routingTable.lookup(destinationHint, this.neighborTrust);
     if (!nextHopId) return;
     for (const envelope of this.queue.getByDestination(destinationHint)) {
@@ -350,6 +432,7 @@ export class RelayNode {
   }
 
   receiveEnvelope(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
+    this.purgeStaleRoutingState();
     if (!validateRoutingHeader(envelope.header)) return { outcome: 'dropped', reason: 'invalid header' };
     if (envelope.header.packetType === PacketType.StoreForwardSync) return this.handleSyncPacket(envelope, fromNodeId);
     if (envelope.header.packetType === PacketType.EmergencyBroadcast) return this.handleBroadcastPacket(envelope, fromNodeId);
@@ -362,6 +445,7 @@ export class RelayNode {
         const pending = this.pendingAcks.get(ackedIdHex);
         if (!pending) return { outcome: 'dropped', reason: 'ack for unknown message' };
         if (!bytesEqual(pending.destinationHint, verifiedAck.signerDestinationHint)) return { outcome: 'dropped', reason: 'ack signer is not the message destination' };
+        this.routingTable.markValidated(pending.destinationHint, pending.neighborId);
         this.neighborTrust.set(pending.neighborId, (this.neighborTrust.get(pending.neighborId) ?? 0) + 1);
         this.pendingAcks.delete(ackedIdHex);
         for (const listener of this.ackListeners) listener(verifiedAck.acknowledgedMessageId);
