@@ -29,7 +29,10 @@ function captureSync(a: RelayNode, neighborId: string): Uint8Array {
   const originalSend = transport.send.bind(transport);
   transport.send = (targetNeighborId: string, frame: Uint8Array) => {
     if (targetNeighborId === neighborId && frame[0] === 0) captured = Uint8Array.from(frame);
-    return originalSend(targetNeighborId, frame);
+    // Capture only. Each test explicitly injects the packet below so replay
+    // state is established at a controlled point rather than as a side effect
+    // of creating the fixture.
+    return true;
   };
   try {
     expect(a.initiateSync(neighborId)).toBe(true);
@@ -47,6 +50,7 @@ describe('C17 replay campaign', () => {
     connectSession(a, b);
     const envelope = captureSync(a, 'b');
 
+    expect(b.receiveEnvelope(envelope, 'a').outcome).toBe('delivered');
     expect(b.receiveEnvelope(envelope, 'a')).toEqual({ outcome: 'dropped', reason: 'sync packet replayed' });
   });
 
@@ -55,6 +59,7 @@ describe('C17 replay campaign', () => {
     const b = new RelayNode('b', createIdentity(), createInternetTransport('b'));
     connectSession(a, b);
     const envelope = captureSync(a, 'b');
+    expect(b.receiveEnvelope(envelope, 'a').outcome).toBe('delivered');
 
     b.unregisterAuthenticatedPeer('a');
     b.registerAuthenticatedSession('a', a.identity.publicKey, {
@@ -99,6 +104,7 @@ describe('C17 replay campaign', () => {
     connectSession(a, b);
     const envelope = captureSync(a, 'b');
 
+    expect(b.receiveEnvelope(envelope, 'a').outcome).toBe('delivered');
     expect(b.purgeStaleSyncReplayRecords(-1)).toBe(1);
     expect(b.receiveEnvelope(envelope, 'a').outcome).toBe('delivered');
   });
