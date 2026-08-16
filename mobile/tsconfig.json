@@ -1,8 +1,14 @@
 {
-  "extends": "@react-native/typescript-config/tsconfig.json",
   "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
     "strict": true,
-    "noEmit": true
+    "noEmit": true,
+    "allowJs": false,
+    "skipLibCheck": true,
+    "types": ["react", "react-native"]
   },
   "include": ["./**/*.ts", "./**/*.tsx"]
 }
