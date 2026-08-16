@@ -109,7 +109,6 @@ class RoutingTable {
     if (!verifyRoutingAdvertisement(ad, nowMs)) return;
     if (!bytesEqual(ad.advertiserPublicKey, authenticatedPeerPublicKey)) return;
     if (!Number.isSafeInteger(sessionEpoch) || sessionEpoch < 0) return;
-
     for (const hint of ad.reachableDestinations) {
       const key = bytesToHex(hint);
       let candidates = this.routes.get(key);
@@ -119,9 +118,7 @@ class RoutingTable {
         status: existing?.status === 'validated' && existing.expiresAt > nowMs ? 'validated' : 'probation',
         lastAdvertisedAt: nowMs,
         expiresAt: existing?.status === 'validated' && existing.expiresAt > nowMs ? nowMs + ROUTE_VALIDATION_TTL_MS : nowMs + ROUTE_PROBATION_MS,
-        binding: existing?.binding && existing.binding.sessionEpoch === sessionEpoch && bytesEqual(existing.binding.advertiserPublicKey, authenticatedPeerPublicKey)
-          ? existing.binding
-          : null,
+        binding: existing?.binding && existing.binding.sessionEpoch === sessionEpoch && bytesEqual(existing.binding.advertiserPublicKey, authenticatedPeerPublicKey) ? existing.binding : null,
       });
     }
   }
@@ -156,12 +153,7 @@ class RoutingTable {
     return purged;
   }
 
-  lookup(
-    destinationHint: Uint8Array,
-    trustScores: Map<string, number>,
-    authenticatedPeers: Map<string, AuthenticatedPeer>,
-    nowMs: number = Date.now(),
-  ): string | null {
+  lookup(destinationHint: Uint8Array, trustScores: Map<string, number>, authenticatedPeers: Map<string, AuthenticatedPeer>, nowMs: number = Date.now()): string | null {
     this.purgeExpired(nowMs);
     const candidates = this.routes.get(bytesToHex(destinationHint));
     if (!candidates || candidates.size === 0) return null;
@@ -172,13 +164,7 @@ class RoutingTable {
       if (!peer) continue;
       if (route.status === 'validated') {
         if (!route.binding) continue;
-        const expected = createRouteProvenance(
-          route.binding.destinationPublicKey,
-          destinationHint,
-          peer.identityPublicKey,
-          neighborId,
-          peer.establishedAt,
-        );
+        const expected = createRouteProvenance(route.binding.destinationPublicKey, destinationHint, peer.identityPublicKey, neighborId, peer.establishedAt);
         if (!matchesRouteTrustBinding(route.binding, expected)) continue;
         const score = trustScores.get(neighborId) ?? 0;
         if (score > bestValidatedScore) { bestValidatedScore = score; bestValidated = neighborId; }
@@ -207,7 +193,6 @@ type SyncPayloadTuple = [0, SyncSummaryEntry[]] | [1, Uint8Array[]] | [2, Uint8A
 type PendingAck = { neighborId: string; destinationHint: Uint8Array; sentAt: number };
 export type AuthenticatedSession = { sessionId: string; sendKey: Uint8Array; receiveKey: Uint8Array };
 type AuthenticatedPeer = { identityPublicKey: Uint8Array; establishedAt: number; session: AuthenticatedSession | null };
-
 type EncodedEncryptedSync = [string, Uint8Array, Uint8Array];
 
 function encodeEncryptedSync(identityPublicKey: Uint8Array, session: AuthenticatedSession, inner: SyncPayloadTuple): Uint8Array {
@@ -279,17 +264,9 @@ export class RelayNode {
   registerAuthenticatedPeer(neighborId: string, peerIdentityPublicKey: Uint8Array, session: AuthenticatedSession | null = null): void {
     if (peerIdentityPublicKey.length !== 32) throw new Error('INVALID_PEER_IDENTITY_KEY');
     if (session && (session.sendKey.length !== 32 || session.receiveKey.length !== 32 || session.sessionId.length === 0)) throw new Error('INVALID_AUTHENTICATED_SESSION');
-    this.authenticatedPeers.set(neighborId, {
-      identityPublicKey: Uint8Array.from(peerIdentityPublicKey),
-      establishedAt: Date.now(),
-      session: session ? { sessionId: session.sessionId, sendKey: Uint8Array.from(session.sendKey), receiveKey: Uint8Array.from(session.receiveKey) } : null,
-    });
+    this.authenticatedPeers.set(neighborId, { identityPublicKey: Uint8Array.from(peerIdentityPublicKey), establishedAt: Date.now(), session: session ? { sessionId: session.sessionId, sendKey: Uint8Array.from(session.sendKey), receiveKey: Uint8Array.from(session.receiveKey) } : null });
   }
-
-  registerAuthenticatedSession(neighborId: string, peerIdentityPublicKey: Uint8Array, session: AuthenticatedSession): void {
-    this.registerAuthenticatedPeer(neighborId, peerIdentityPublicKey, session);
-  }
-
+  registerAuthenticatedSession(neighborId: string, peerIdentityPublicKey: Uint8Array, session: AuthenticatedSession): void { this.registerAuthenticatedPeer(neighborId, peerIdentityPublicKey, session); }
   unregisterAuthenticatedPeer(neighborId: string): void { this.authenticatedPeers.delete(neighborId); }
   isAuthenticatedPeer(neighborId: string): boolean { return this.authenticatedPeers.has(neighborId); }
 
@@ -419,17 +396,32 @@ export class RelayNode {
     if (envelope.header.ttl > 0) { const forwarded: Envelope = { header: { ...envelope.header, ttl: envelope.header.ttl - 1 }, sealedPayload: envelope.sealedPayload }; for (const neighborId of this.transport.discoverNeighbors()) if (neighborId !== fromNodeId) this.sendEnvelopeOverTransport(neighborId, forwarded); }
     return { outcome: 'broadcast', message };
   }
+
   /** Send a packet through an authenticated direct or routed mesh path. */
   sendEnvelope(envelope: Envelope): DeliveryResult {
     this.purgeStaleRoutingState();
     if (!validateRoutingHeader(envelope.header)) return { outcome: 'dropped', reason: 'invalid header' };
-    const direct = Array.from(this.authenticatedPeers.entries()).find(([id, peer]) =>
-      bytesEqual(computeDestinationHint(peer.identityPublicKey), envelope.header.destinationHint)
-    )?.[0];
+    const direct = Array.from(this.authenticatedPeers.entries()).find(([id, peer]) => bytesEqual(computeDestinationHint(peer.identityPublicKey), envelope.header.destinationHint))?.[0];
     const nextHopId = direct ?? this.routingTable.lookup(envelope.header.destinationHint, this.neighborTrust, this.authenticatedPeers);
     if (nextHopId && this.forwardOverTransport(envelope, nextHopId)) return { outcome: 'forwarded', to: nextHopId };
     const stored = this.queue.store(envelope, 'origin');
     return stored.stored ? { outcome: 'queued' } : { outcome: 'dropped', reason: stored.reason ?? 'unknown' };
+  }
+
+  private processPendingAck(envelope: Envelope, fromNodeId: string): boolean {
+    const verifiedAck = verifyAckEnvelope(envelope);
+    if (!verifiedAck) return false;
+    const ackedIdHex = bytesToHex(verifiedAck.acknowledgedMessageId);
+    const pending = this.pendingAcks.get(ackedIdHex);
+    if (!pending || pending.neighborId !== fromNodeId) return false;
+    if (!bytesEqual(pending.destinationHint, verifiedAck.signerDestinationHint)) return false;
+    const peer = this.authenticatedPeers.get(fromNodeId);
+    if (!peer) return false;
+    // C12: destination signer proves delivery; authenticated neighbor proves the relay path.
+    this.routingTable.markValidated(pending.destinationHint, verifiedAck.signerPublicKey, pending.neighborId, peer.identityPublicKey, peer.establishedAt);
+    this.neighborTrust.set(pending.neighborId, (this.neighborTrust.get(pending.neighborId) ?? 0) + 1);
+    this.pendingAcks.delete(ackedIdHex);
+    return true;
   }
 
   receiveEnvelope(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
@@ -437,17 +429,19 @@ export class RelayNode {
     if (!validateRoutingHeader(envelope.header)) return { outcome: 'dropped', reason: 'invalid header' };
     if (envelope.header.packetType === PacketType.StoreForwardSync) return this.handleSyncPacket(envelope, fromNodeId);
     if (envelope.header.packetType === PacketType.EmergencyBroadcast) return this.handleBroadcastPacket(envelope, fromNodeId);
+
+    if (envelope.header.packetType === PacketType.Ack && fromNodeId) {
+      const verifiedAck = verifyAckEnvelope(envelope);
+      if (!verifiedAck) return { outcome: 'dropped', reason: 'invalid ack signature' };
+      const pending = this.pendingAcks.get(bytesToHex(verifiedAck.acknowledgedMessageId));
+      if (pending && !this.processPendingAck(envelope, fromNodeId)) return { outcome: 'dropped', reason: 'ack route provenance mismatch' };
+      if (!pending && bytesEqual(envelope.header.destinationHint, this.ownDestinationHint)) return { outcome: 'dropped', reason: 'ack for unknown message' };
+    }
+
     if (bytesEqual(envelope.header.destinationHint, this.ownDestinationHint)) {
       if (envelope.header.packetType === PacketType.Ack) {
-        const verifiedAck = verifyAckEnvelope(envelope); if (!verifiedAck) return { outcome: 'dropped', reason: 'invalid ack signature' };
-        const ackedIdHex = bytesToHex(verifiedAck.acknowledgedMessageId); const pending = this.pendingAcks.get(ackedIdHex);
-        if (!pending) return { outcome: 'dropped', reason: 'ack for unknown message' };
-        if (!bytesEqual(pending.destinationHint, verifiedAck.signerDestinationHint)) return { outcome: 'dropped', reason: 'ack signer is not the message destination' };
-        const peer = this.authenticatedPeers.get(pending.neighborId);
-        if (!peer) return { outcome: 'dropped', reason: 'ack route provenance mismatch' };
-        // C12: destination signer proves delivery; authenticated neighbor proves the relay path.
-        this.routingTable.markValidated(pending.destinationHint, verifiedAck.signerPublicKey, pending.neighborId, peer.identityPublicKey, peer.establishedAt);
-        this.neighborTrust.set(pending.neighborId, (this.neighborTrust.get(pending.neighborId) ?? 0) + 1); this.pendingAcks.delete(ackedIdHex);
+        const verifiedAck = verifyAckEnvelope(envelope);
+        if (!verifiedAck) return { outcome: 'dropped', reason: 'invalid ack signature' };
         for (const listener of this.ackListeners) listener(verifiedAck.acknowledgedMessageId);
       } else for (const listener of this.deliveryListeners) listener(envelope);
       return { outcome: 'delivered', envelope };
