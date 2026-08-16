@@ -2,7 +2,7 @@
 
 This tracks what's actually built and tested, against the RFC series (`Zaycomm-Complete-RFC-Series.md`). Update this file as each piece lands; it's the map between "what the spec says" and "what code actually exists right now."
 
-**Status: v1.0 shipped.** All seven RFC-0010 phases complete. The security hardening campaign has progressed through C20, with C12/C14 final end-to-end verification now the active gate before release.
+**Status: v1.0 shipped.** All seven RFC-0010 phases complete. The security hardening campaign C1–C20 is complete, and the C12/C14 final integration gate is now verified. Real node communication is the next implementation track.
 
 **Stack:** TypeScript, Node, vitest.
 **Repo:** `/workspaces/Zaycomm` (public, github.com/Zaygal/Zaycomm)
@@ -42,7 +42,7 @@ Bluetooth, Wi-Fi Direct, Internet transports, and centralized MTU-aware fragment
 
 Gateway-to-gateway sync exists as summary/request/transfer protocol messages and preserves the bandwidth-saving overlap behavior.
 
-**Known scope:** `initiateSync()` is caller-triggered, and the original sync path is direct-neighbor only. C14 adds encrypted/authenticated node-session handling; final end-to-end verification is still pending.
+**Known scope:** `initiateSync()` is caller-triggered, and the sync path is direct-neighbor only. C14 adds encrypted/authenticated node-session handling.
 
 ## Phase 7 — Extended Message Types — ✅ COMPLETE
 `src/message/message.ts`, `src/broadcast/broadcast.ts`, `src/message/file.ts`, `src/message/voice.ts`
@@ -119,22 +119,20 @@ Fragment cleanup, global limits, per-peer quotas, and authenticated fragment own
 ### C11 — Broadcast amplification — ✅ COMPLETE
 Broadcast size and origin/receiver budgets are bounded, with duplicate suppression separate from rate limiting.
 
-### C12 — Routing / trust cryptographic binding — 🟡 IMPLEMENTED — VERIFICATION PENDING
+### C12 — Routing / trust cryptographic binding — ✅ COMPLETE
 `src/routing/routing.ts`, `src/routing/route-provenance.ts`, `test/c21-node-communication.test.ts`
 
-Route trust now carries explicit provenance: destination identity, destination hint, authenticated neighbor identity, and session context. ACK processing preserves the critical distinction: **destination signer proves delivery; authenticated neighbor proves the relay path**. A destination signer is not incorrectly treated as the relay neighbor in a legitimate multi-hop route.
+Route trust carries explicit provenance: destination identity, destination hint, authenticated neighbor identity, and session context. ACK processing preserves the critical distinction: **destination signer proves delivery; authenticated neighbor proves the relay path**. A destination signer is not incorrectly treated as the relay neighbor in a legitimate multi-hop route.
 
-Verification initially exposed a routing regression: the implementation had incorrectly required a signed destination advertisement's signer to equal the immediate authenticated relay neighbor. That broke legitimate A → relay → destination propagation and caused cascading failures in routing, transport-fragmentation, sync, and voice tests. The fix now accepts a valid destination-signed advertisement through an authenticated neighbor while keeping route trust probationary until correlated ACK validation binds the destination signer to that neighbor/session.
-
-The fix is committed to `Test`; C12 remains pending until the Codespace regression passes.
+The dedicated C12/C14 integration path verified A → relay → destination forwarding and the return ACK path. The routing-advertisement regression was corrected so a valid destination-signed advertisement can be propagated through an authenticated neighbor while remaining probationary until correlated ACK validation binds the destination signer to that neighbor/session.
 
 ### C13 — Automatic stale-state cleanup — ✅ COMPLETE
 Routing, broadcast, fragment, sync replay, pending-ACK, and related security-sensitive state have bounded lifetime/cleanup behavior.
 
-### C14 — Sync confidentiality — 🟡 IMPLEMENTED — VERIFICATION PENDING
-`src/routing/routing.ts`, `src/sync/session-sync.ts`, `test/c21-node-communication.test.ts`
+### C14 — Sync confidentiality — ✅ COMPLETE
+`src/routing/routing.ts`, `src/sync/session-sync.ts`, `test/c14-sync-confidentiality.test.ts`, `test/c21-node-communication.test.ts`
 
-Store-forward synchronization is now encoded inside an established encrypted/authenticated node session. Sync packets bind sender identity to the authenticated neighbor/session, reject replay, and bound summary/request/transfer sizes. Final completion requires actual Codespace execution of the integration and full regression tests.
+Store-forward synchronization is encoded inside an established encrypted/authenticated node session. Sync packets bind sender identity to the authenticated neighbor/session, reject replay, and bound summary/request/transfer sizes. The dedicated production RelayNode sync-path test and full regression both pass.
 
 ### C15 — Handshake root-key exposure — 🟢 COMPLETE
 Sensitive root-key handling is encapsulated and unnecessary external exposure/mutation has been removed.
@@ -156,17 +154,34 @@ Concurrency/state-race scenarios from the adversarial campaign have been impleme
 
 ## Security release gate
 
-`Test` is **not release-ready** until C12 and C14 final end-to-end verification passes in the actual Codespace, followed by the final full adversarial regression. Historical regression counts alone are not sufficient security evidence.
+**C1–C20 are verified.** The latest Codespace regression passed **199 / 199 tests across 38 test files**. C12 and C14 are no longer pending.
 
-### Current implementation state
-
-The latest implementation work corrects relay advertisement handling for multi-hop routing. The branch contains the source fix and dedicated C12/C14 integration tests. The observed Codespace run had **31 failed / 168 passed (199 total)**; those failures were dominated by the routing-advertisement regression described under C12. A fresh regression run is required before updating the verified test count.
+The security release gate is therefore green for the current modeled transports and protocol implementation. Real hardware transport remains a separate implementation track.
 
 ---
 
-## Remaining known gaps (lower priority)
+# Node Communication Track — C21/C22
 
-- **Long range radio transport (RFC-0008 §4)** — LoRa, HF packet radio, satellite not modeled; Bluetooth, Wi-Fi Direct, and Internet transports exist.
+### C21 — RelayNode multi-hop integration — ✅ COMPLETE
+`test/c21-node-communication.test.ts`
+
+Verified A → relay → B → relay → A at the `RelayNode`/Transport boundary using the transport contract. This includes destination-signed ACK validation, relay-bound trust, and encrypted store-forward synchronization.
+
+### C22 — Real node transport — 🟡 IMPLEMENTED — VERIFICATION PENDING
+`src/transport/udp.ts`, `test/c22-real-node-communication.test.ts`
+
+Added a real Node.js UDP transport carrying opaque Zaycomm frames between independent socket endpoints. The first integration test exercises A → relay → B and the destination-signed ACK return path over actual UDP sockets; the second verifies opaque frame delivery and MTU enforcement.
+
+C22 is not complete until the actual Codespace runs the new tests successfully. After that, the next step is packaging node startup/configuration so separate Zaycomm processes can be launched as real peers rather than only instantiated inside one test process.
+
+---
+
+## Remaining known gaps / next implementation targets
+
+- **C22 real node transport verification** — run the new UDP integration tests in the Codespace.
+- **Separate node runtime / configuration** — expose peer identity, transport endpoint, neighbor configuration, and lifecycle through a runnable Node process.
+- **Real Bluetooth/Wi-Fi Direct adapters** — current Bluetooth/Wi-Fi transports remain constraint models; hardware-specific adapters are not yet implemented.
+- **Long range radio transport (RFC-0008 §4)** — LoRa, HF packet radio, satellite not modeled.
 - **Auto-sync trigger / multi-hop sync routing** — caller-triggered sync and direct-neighbor session synchronization remain deliberate scope boundaries unless promoted by the architecture plan.
 
 ---
@@ -193,9 +208,9 @@ The latest implementation work corrects relay advertisement handling for multi-h
 | C9 sinkhole defense | 145 |
 | C10 fragment exhaustion defense | 149 |
 | C11 broadcast amplification defense | 152 |
-| C15–C20 adversarial campaign | **194** |
-| C12/C14 integration tests added | **194 + new tests pending execution** |
-| Latest observed verification run | **168 passed / 31 failed (199 total)** |
+| C15–C20 adversarial campaign | 194 |
+| C12/C14 integration tests | 199 |
+| Latest verified Codespace regression | **199 passed / 199 total** |
 
 ---
 
@@ -206,7 +221,8 @@ The latest implementation work corrects relay advertisement handling for multi-h
 - `cbor-x`'s `Encoder` can reuse internal buffers; copy encoded values with `Uint8Array.from(...)` whenever encoded values need to survive another encode/decode operation.
 - A transport `send()` failure can desync a ratchet if the caller does not know the send will fail before encrypting; MTU-aware fragmentation addresses the original source of this failure class.
 - Full-file mobile pastes can silently fail to save; verify the file before running tests.
+- C22's UDP transport is Node.js-only and intentionally leaves protocol authentication/encryption above the transport layer.
 
 ---
 
-*Last updated: routing verification regression identified and corrected; fresh Codespace regression pending.*
+*Last updated: C12/C14 verified at 199/199; C22 real UDP node communication implementation added, Codespace verification pending.*
