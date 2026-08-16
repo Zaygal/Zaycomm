@@ -8,6 +8,8 @@ import { createBluetoothTransport, type SimulatedTransport } from '../src/transp
 
 function connectNodes(a: RelayNode, b: RelayNode): void {
   (a.transport as SimulatedTransport).connectPeer(b.transport as SimulatedTransport);
+  a.registerAuthenticatedPeer(b.id, b.identity.publicKey);
+  b.registerAuthenticatedPeer(a.id, a.identity.publicKey);
 }
 
 const text = (s: string) => new TextEncoder().encode(s);
@@ -62,8 +64,6 @@ describe('C9 routing sinkhole / blackhole resistance', () => {
     origin.receiveAdvertisement('relay', createRoutingAdvertisement(destination.identity, [destinationHint]));
     relay.receiveAdvertisement('destination', createRoutingAdvertisement(destination.identity, [destinationHint]));
     relay.receiveAdvertisement('origin', createRoutingAdvertisement(origin.identity, [originHint]));
-    // The destination needs a return route to the origin so its signed ACK can
-    // traverse the same relay path back to the sender.
     destination.receiveAdvertisement('relay', createRoutingAdvertisement(origin.identity, [originHint]));
 
     destination.onDelivered((delivered) => {
