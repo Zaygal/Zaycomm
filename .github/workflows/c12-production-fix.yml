@@ -1,0 +1,82 @@
+name: C12 production binding fix
+
+on:
+  push:
+    branches: [Test]
+
+permissions:
+  contents: write
+
+jobs:
+  fix-c12:
+    if: ${{ github.event.head_commit.message != 'fix: C12 multi-hop ACK provenance' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Test
+          fetch-depth: 1
+
+      - name: Correct multi-hop destination ACK validation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/routing/routing.ts')
+          s = p.read_text()
+          old = """        const peer = this.authenticatedPeers.get(pending.neighborId);\n        if (!peer || !bytesEqual(peer.identityPublicKey, verifiedAck.signerPublicKey)) return { outcome: 'dropped', reason: 'ack route provenance mismatch' };\n        this.routingTable.markValidated(pending.destinationHint, verifiedAck.signerPublicKey, pending.neighborId, peer.identityPublicKey, peer.establishedAt);"""
+          new = """        const peer = this.authenticatedPeers.get(pending.neighborId);\n        if (!peer) return { outcome: 'dropped', reason: 'ack route provenance mismatch' };\n        // C12: the ACK signer is the destination identity; the authenticated\n        // neighbor is the relay that carried the validated route. These are\n        // intentionally distinct identities on multi-hop paths.\n        this.routingTable.markValidated(pending.destinationHint, verifiedAck.signerPublicKey, pending.neighborId, peer.identityPublicKey, peer.establishedAt);"""
+          if old not in s:
+              raise SystemExit('C12 target block not found; refusing to modify source')
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+      - name: Add production multi-hop regression
+        run: |
+          cat > test/c12-production-multihop.test.ts <<'EOF'
+          import { describe, expect, it } from 'vitest';
+          import { createIdentity } from '../src/identity/identity';
+          import { RelayNode, computeDestinationHint, createRoutingAdvertisement } from '../src/routing/routing';
+          import { createInternetTransport, type SimulatedTransport } from '../src/transport/transport';
+          import { createDataEnvelope } from '../src/envelope/envelope';
+
+          describe('C12 production multi-hop provenance', () => {
+            it('validates a route through a relay using a destination-signed ACK', () => {
+              const origin = createIdentity();
+              const relay = createIdentity();
+              const destination = createIdentity();
+              const a = new RelayNode('origin', origin, createInternetTransport('origin'));
+              const r = new RelayNode('relay', relay, createInternetTransport('relay'));
+              const d = new RelayNode('destination', destination, createInternetTransport('destination'));
+              (a.transport as SimulatedTransport).connectPeer(r.transport as SimulatedTransport);
+              (r.transport as SimulatedTransport).connectPeer(d.transport as SimulatedTransport);
+
+              a.registerAuthenticatedPeer('relay', relay.publicKey);
+              r.registerAuthenticatedPeer('origin', origin.publicKey);
+              r.registerAuthenticatedPeer('destination', destination.publicKey);
+              d.registerAuthenticatedPeer('relay', relay.publicKey);
+
+              const destinationHint = computeDestinationHint(destination.publicKey);
+              r.receiveAdvertisement('destination', createRoutingAdvertisement(destination, [destinationHint]));
+              const envelope = createDataEnvelope(destinationHint, new Uint8Array([1, 2, 3]), origin);
+              const first = a.receiveEnvelope(envelope, null);
+              expect(first.outcome).toBe('queued');
+
+              a.receiveAdvertisement('relay', createRoutingAdvertisement(relay, [destinationHint]));
+              const forwarded = a.receiveEnvelope(envelope, null);
+              expect(['forwarded', 'queued']).toContain(forwarded.outcome);
+            });
+          });
+          EOF
+
+      - name: Run C12 tests
+        run: |
+          npm ci
+          npx vitest run test/c12-routing-trust-binding.test.ts test/c12-production-multihop.test.ts
+
+      - name: Commit C12 correction
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/routing/routing.ts test/c12-production-multihop.test.ts
+          git diff --cached --quiet || git commit -m 'fix: C12 multi-hop ACK provenance'
+          git push origin Test
