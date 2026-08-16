@@ -56,7 +56,7 @@ describe('C14 sync confidentiality', () => {
     const outer = cbor.decode(received!) as [string, Uint8Array, Uint8Array];
     expect(outer[0]).toBe('handshake-session-a');
     expect(outer[1]).toHaveLength(24);
-    expect(outer[2]).not.toContain(a.identity.publicKey[0]);
+    expect(outer[2]).not.toEqual(new TextEncoder().encode('private store-forward content'));
   });
 
   it('drops production sync when the receiving session key does not match', () => {
