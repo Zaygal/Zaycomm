@@ -2,7 +2,7 @@
 
 This tracks what's actually built and tested, against the RFC series (`Zaycomm-Complete-RFC-Series.md`). Update this file as each piece lands; it's the map between "what the spec says" and "what code actually exists right now."
 
-**Status: v1.0 shipped.** All seven RFC-0010 phases complete. The security hardening campaign C1–C20 is complete, and the C12/C14 final integration gate is now verified. Real node communication is the next implementation track.
+**Status: v1.0 shipped.** All seven RFC-0010 phases complete. The security hardening campaign C1–C20 is complete, C12/C14 are verified, and the real-node communication track is now active.
 
 **Stack:** TypeScript, Node, vitest.
 **Repo:** `/workspaces/Zaycomm` (public, github.com/Zaygal/Zaycomm)
@@ -154,35 +154,45 @@ Concurrency/state-race scenarios from the adversarial campaign have been impleme
 
 ## Security release gate
 
-**C1–C20 are verified.** The latest Codespace regression passed **199 / 199 tests across 38 test files**. C12 and C14 are no longer pending.
+**C1–C20 are verified.** The latest Codespace regression passed **202 / 202 tests across 40 test files** after adding real node-process communication. C12 and C14 are no longer pending.
 
-The security release gate is therefore green for the current modeled transports and protocol implementation. Real hardware transport remains a separate implementation track.
+The security release gate is green for the current modeled transports and protocol implementation. Real hardware transport remains a separate implementation track.
 
 ---
 
-# Node Communication Track — C21/C22
+# Node Communication Track — C21–C24
 
 ### C21 — RelayNode multi-hop integration — ✅ COMPLETE
 `test/c21-node-communication.test.ts`
 
 Verified A → relay → B → relay → A at the `RelayNode`/Transport boundary using the transport contract. This includes destination-signed ACK validation, relay-bound trust, and encrypted store-forward synchronization.
 
-### C22 — Real node transport — 🟡 IMPLEMENTED — VERIFICATION PENDING
+### C22 — Real UDP node transport — ✅ COMPLETE
 `src/transport/udp.ts`, `test/c22-real-node-communication.test.ts`
 
-Added a real Node.js UDP transport carrying opaque Zaycomm frames between independent socket endpoints. The first integration test exercises A → relay → B and the destination-signed ACK return path over actual UDP sockets; the second verifies opaque frame delivery and MTU enforcement.
+Added a real Node.js UDP transport carrying opaque Zaycomm frames between independent socket endpoints. Verified A → relay → B and the destination-signed ACK return path over actual UDP sockets, plus opaque frame delivery and MTU enforcement. C22 passed in the Codespace and the subsequent full regression remained green.
 
-C22 is not complete until the actual Codespace runs the new tests successfully. After that, the next step is packaging node startup/configuration so separate Zaycomm processes can be launched as real peers rather than only instantiated inside one test process.
+### C23 — Independent node processes — ✅ COMPLETE
+`src/node/node-process.ts`, `test/c23-independent-node-processes.test.ts`
+
+Zaycomm nodes can now be launched as separate OS processes with their own identities, UDP sockets, peer configuration, lifecycle, and protocol stdin/stdout control channel. Verified Alice → Relay → Bob and Bob → Relay → Alice across separate processes. C23 passed, and the full regression reached **202 / 202**.
+
+### C24 — Independent-process encrypted sync — 🟡 IMPLEMENTED — VERIFICATION PENDING
+`src/node/node-process.ts`, `test/c24-independent-node-sync.test.ts`
+
+The runnable node process now exposes an explicit `initiate-sync` control operation and queue status for integration verification. The new C24 test creates directional session keys for two independent node processes, queues an envelope at Alice, initiates encrypted C14 synchronization over real UDP, and verifies the transferred envelope is present in Relay's store-forward queue.
+
+C24 is not complete until the new test passes in the Codespace and the full regression is re-run.
 
 ---
 
 ## Remaining known gaps / next implementation targets
 
-- **C22 real node transport verification** — run the new UDP integration tests in the Codespace.
-- **Separate node runtime / configuration** — expose peer identity, transport endpoint, neighbor configuration, and lifecycle through a runnable Node process.
+- **C24 independent-process encrypted sync verification** — run the new production-process sync test.
 - **Real Bluetooth/Wi-Fi Direct adapters** — current Bluetooth/Wi-Fi transports remain constraint models; hardware-specific adapters are not yet implemented.
 - **Long range radio transport (RFC-0008 §4)** — LoRa, HF packet radio, satellite not modeled.
 - **Auto-sync trigger / multi-hop sync routing** — caller-triggered sync and direct-neighbor session synchronization remain deliberate scope boundaries unless promoted by the architecture plan.
+- **Production configuration/discovery** — current node-process configuration is environment/command driven; a durable config format and operational CLI remain future work.
 
 ---
 
@@ -210,7 +220,8 @@ C22 is not complete until the actual Codespace runs the new tests successfully. 
 | C11 broadcast amplification defense | 152 |
 | C15–C20 adversarial campaign | 194 |
 | C12/C14 integration tests | 199 |
-| Latest verified Codespace regression | **199 passed / 199 total** |
+| C22 real UDP node communication | 201 |
+| C23 independent node processes | **202 passed / 202 total** |
 
 ---
 
@@ -222,7 +233,8 @@ C22 is not complete until the actual Codespace runs the new tests successfully. 
 - A transport `send()` failure can desync a ratchet if the caller does not know the send will fail before encrypting; MTU-aware fragmentation addresses the original source of this failure class.
 - Full-file mobile pastes can silently fail to save; verify the file before running tests.
 - C22's UDP transport is Node.js-only and intentionally leaves protocol authentication/encryption above the transport layer.
+- C23/C24 node-process integration is Node.js-only and uses newline-delimited JSON commands on stdin plus newline-delimited JSON events on stdout.
 
 ---
 
-*Last updated: C12/C14 verified at 199/199; C22 real UDP node communication implementation added, Codespace verification pending.*
+*Last updated: C23 verified at 202/202; C24 independent-process encrypted sync implementation added, Codespace verification pending.*
