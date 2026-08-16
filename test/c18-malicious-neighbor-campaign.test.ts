@@ -20,6 +20,7 @@ describe('C18 malicious-neighbor campaign', () => {
     const malicious = new RelayNode('malicious', createIdentity(), createBluetoothTransport('malicious'));
     const destination = createIdentity();
     connect(origin, malicious);
+    origin.registerAuthenticatedPeer('malicious', malicious.identity.publicKey);
 
     const hint = computeDestinationHint(destination.publicKey);
     origin.receiveAdvertisement('malicious', createRoutingAdvertisement(destination, [hint]));
@@ -83,6 +84,7 @@ describe('C18 malicious-neighbor campaign', () => {
     const malicious = new RelayNode('malicious', createIdentity(), createBluetoothTransport('malicious'));
     const destination = createIdentity();
     connect(origin, malicious);
+    origin.registerAuthenticatedPeer('malicious', malicious.identity.publicKey);
 
     const hint = computeDestinationHint(destination.publicKey);
     origin.receiveAdvertisement('malicious', createRoutingAdvertisement(destination, [hint]));
@@ -95,6 +97,7 @@ describe('C18 malicious-neighbor campaign', () => {
     const relay = new RelayNode('relay', createIdentity(), createBluetoothTransport('relay'));
     const attacker = new RelayNode('attacker', createIdentity(), createBluetoothTransport('attacker'));
     connect(relay, attacker);
+    relay.registerAuthenticatedPeer('attacker', attacker.identity.publicKey);
 
     for (let i = 0; i < 64; i++) {
       const destination = createIdentity();
