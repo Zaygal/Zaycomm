@@ -4,6 +4,7 @@ import { decryptSyncPayload, encryptSyncPayload } from '../src/sync/session-sync
 import { createIdentity } from '../src/identity/identity';
 import { RelayNode } from '../src/routing/routing';
 import { createInternetTransport, type SimulatedTransport } from '../src/transport/transport';
+import { decodeEnvelope } from '../src/envelope/envelope';
 
 const cbor = new Encoder();
 
@@ -59,7 +60,10 @@ describe('C14 sync confidentiality', () => {
     }
 
     expect(captured).not.toBeNull();
-    const outer = cbor.decode(captured!.slice(1)) as [string, Uint8Array, Uint8Array];
+    // The transport frame is an encoded Envelope. The encrypted sync tuple is
+    // the envelope payload, not the outer envelope itself.
+    const envelope = decodeEnvelope(captured!.slice(1));
+    const outer = cbor.decode(envelope.sealedPayload) as [string, Uint8Array, Uint8Array];
     expect(outer[0]).toBe('handshake-session-a');
     expect(outer[1]).toHaveLength(24);
     expect(outer[2]).not.toEqual(plaintext);
