@@ -419,6 +419,19 @@ export class RelayNode {
     if (envelope.header.ttl > 0) { const forwarded: Envelope = { header: { ...envelope.header, ttl: envelope.header.ttl - 1 }, sealedPayload: envelope.sealedPayload }; for (const neighborId of this.transport.discoverNeighbors()) if (neighborId !== fromNodeId) this.sendEnvelopeOverTransport(neighborId, forwarded); }
     return { outcome: 'broadcast', message };
   }
+  /** Send a packet through an authenticated direct or routed mesh path. */
+  sendEnvelope(envelope: Envelope): DeliveryResult {
+    this.purgeStaleRoutingState();
+    if (!validateRoutingHeader(envelope.header)) return { outcome: 'dropped', reason: 'invalid header' };
+    const direct = Array.from(this.authenticatedPeers.entries()).find(([id, peer]) =>
+      bytesEqual(computeDestinationHint(peer.identityPublicKey), envelope.header.destinationHint)
+    )?.[0];
+    const nextHopId = direct ?? this.routingTable.lookup(envelope.header.destinationHint, this.neighborTrust, this.authenticatedPeers);
+    if (nextHopId && this.forwardOverTransport(envelope, nextHopId)) return { outcome: 'forwarded', to: nextHopId };
+    const stored = this.queue.store(envelope, 'origin');
+    return stored.stored ? { outcome: 'queued' } : { outcome: 'dropped', reason: stored.reason ?? 'unknown' };
+  }
+
   receiveEnvelope(envelope: Envelope, fromNodeId: string | null): DeliveryResult {
     this.purgeStaleRoutingState();
     if (!validateRoutingHeader(envelope.header)) return { outcome: 'dropped', reason: 'invalid header' };
@@ -431,7 +444,8 @@ export class RelayNode {
         if (!pending) return { outcome: 'dropped', reason: 'ack for unknown message' };
         if (!bytesEqual(pending.destinationHint, verifiedAck.signerDestinationHint)) return { outcome: 'dropped', reason: 'ack signer is not the message destination' };
         const peer = this.authenticatedPeers.get(pending.neighborId);
-        if (!peer || !bytesEqual(peer.identityPublicKey, verifiedAck.signerPublicKey)) return { outcome: 'dropped', reason: 'ack route provenance mismatch' };
+        if (!peer) return { outcome: 'dropped', reason: 'ack route provenance mismatch' };
+        // C12: destination signer proves delivery; authenticated neighbor proves the relay path.
         this.routingTable.markValidated(pending.destinationHint, verifiedAck.signerPublicKey, pending.neighborId, peer.identityPublicKey, peer.establishedAt);
         this.neighborTrust.set(pending.neighborId, (this.neighborTrust.get(pending.neighborId) ?? 0) + 1); this.pendingAcks.delete(ackedIdHex);
         for (const listener of this.ackListeners) listener(verifiedAck.acknowledgedMessageId);
