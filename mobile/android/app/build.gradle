@@ -27,16 +27,12 @@ android {
         }
     }
 
-    externalNativeBuild {
-        cmake {
-            path file('src/main/jni/CMakeLists.txt')
-        }
-    }
+    // React Native 0.86's Gradle plugin owns the New Architecture native
+    // integration. Zaycomm currently has no app-owned C++ targets, so do not
+    // override it with a second application CMake entry point.
 }
 
 react {
-    // React Native 0.86 New Architecture requires the generated
-    // autolinking CMake files to be registered with the application.
     autolinkLibrariesWithApp()
 }
 
