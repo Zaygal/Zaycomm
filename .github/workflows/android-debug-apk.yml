@@ -45,6 +45,7 @@ jobs:
           gradle-version: '8.11.1'
 
       - name: Build debug APK
+        working-directory: mobile/android
         run: gradle --no-daemon --stacktrace :app:assembleDebug
 
       - name: Upload APK
