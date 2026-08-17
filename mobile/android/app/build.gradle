@@ -16,6 +16,17 @@ android {
         versionName '0.1.0'
     }
 
+    buildTypes {
+        // Standalone diagnostic APK: release-like React Native behavior
+        // (bundled JS, no Metro dependency) while remaining installable with
+        // the standard debug signing key. This is for device validation only.
+        diagnostic {
+            initWith release
+            signingConfig signingConfigs.debug
+            matchingFallbacks = ['release']
+        }
+    }
+
     externalNativeBuild {
         cmake {
             path file('src/main/jni/CMakeLists.txt')
