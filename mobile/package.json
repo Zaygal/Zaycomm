@@ -12,7 +12,8 @@
   "dependencies": {
     "react": "19.2.0",
     "react-native": "0.86.2",
-    "react-native-qrcode-svg": "^6.3.20"
+    "react-native-qrcode-svg": "^6.3.20",
+    "react-native-svg": "^15.15.0"
   },
   "devDependencies": {
     "@react-native-community/cli": "latest",
