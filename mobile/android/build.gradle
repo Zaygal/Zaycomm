@@ -3,4 +3,12 @@ plugins {
     id 'com.facebook.react' version '0.86.2' apply false
 }
 
+ext {
+    // Provide compatibility values for native libraries such as react-native-svg
+    // that read Android SDK versions from the root project.
+    compileSdkVersion = 35
+    targetSdkVersion = 35
+    minSdkVersion = 26
+}
+
 apply plugin: 'com.facebook.react.rootproject'
