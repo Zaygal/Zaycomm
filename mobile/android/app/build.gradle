@@ -28,5 +28,14 @@ react {
     autolinkLibrariesWithApp()
 }
 
+dependencies {
+    // React Native 0.86.2 runtime artifacts required by generated sources.
+    implementation('com.facebook.react:react-android')
+
+    if (hermesEnabled.toBoolean()) {
+        implementation('com.facebook.react:hermes-android')
+    }
+}
+
 // C25.4 debug APK: installable on a physical Android device for BLE validation.
 // Release signing is intentionally left to the eventual distribution pipeline.
