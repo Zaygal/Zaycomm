@@ -1,3 +1,4 @@
+import 'react-native-get-random-values';
 import Sentry from './sentry';
 import {AppRegistry} from 'react-native';
 import App from './App';
