@@ -10,6 +10,7 @@
     "ios": "react-native run-ios"
   },
   "dependencies": {
+    "@noble/curves": "^2.0.0",
     "@noble/hashes": "^2.2.0",
     "@sentry/react-native": "8.21.0",
     "react": "19.2.3",
