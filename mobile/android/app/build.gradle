@@ -36,6 +36,10 @@ dependencies {
     if (hermesEnabled.toBoolean()) {
         implementation('com.facebook.react:hermes-android')
     }
+
+    // ReactActivity extends AppCompatActivity and therefore requires an
+    // AppCompat theme at runtime.
+    implementation('androidx.appcompat:appcompat:1.7.0')
 }
 
 // C25.4 debug APK: installable on a physical Android device for BLE validation.
