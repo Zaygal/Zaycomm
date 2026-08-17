@@ -1,4 +1,5 @@
 import {AppRegistry} from 'react-native';
 import App from './App';
 
-AppRegistry.registerComponent('Zaycomm', () => App);
+// Must match MainActivity#getMainComponentName().
+AppRegistry.registerComponent('ZaycommMobile', () => App);
