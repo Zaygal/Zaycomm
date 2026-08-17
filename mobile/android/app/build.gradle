@@ -1,0 +1,24 @@
+plugins {
+    id 'com.android.application'
+    id 'com.facebook.react'
+}
+
+android {
+    namespace 'com.zaycomm.mobile'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.zaycomm.mobile'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+    }
+}
+
+react {
+    autolinkLibrariesWithApp()
+}
+
+// C25.4 debug APK: installable on a physical Android device for BLE validation.
+// Release signing is intentionally left to the eventual distribution pipeline.
