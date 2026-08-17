@@ -111,7 +111,6 @@ class ZaycommBleModule(private val context: ReactApplicationContext) : ReactCont
         // Keep advertisements interoperable with iOS CoreBluetooth: only the
         // public service is advertised. Node identity is authenticated later.
         val data = AdvertiseData.Builder().setIncludeDeviceName(false).addServiceUuid(ParcelUuid(serviceUuid)).build()
-        _ = nodeId
         advertiser?.startAdvertising(settings, data, object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings) = promise.resolve(null)
             override fun onStartFailure(errorCode: Int) = promise.reject("BLE_ADVERTISE", "BLE advertising failed: $errorCode")
