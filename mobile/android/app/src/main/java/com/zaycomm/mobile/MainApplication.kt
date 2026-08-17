@@ -38,11 +38,10 @@ class MainApplication : Application(), ReactApplication {
             options.setAttachThreads(true)
         }
 
+        // Keep startup diagnostics simple and compatible with the installed
+        // Sentry Android SDK. The previous addBreadcrumb lambda did not match
+        // this SDK's Kotlin API and caused compile-time failures.
         Log.i("ZaycommStartup", "MainApplication.onCreate reached; native Sentry initialized")
-        Sentry.addBreadcrumb { breadcrumb ->
-            breadcrumb.category = "zaycomm.startup"
-            breadcrumb.message = "MainApplication.onCreate reached"
-        }
         Sentry.captureMessage("Zaycomm native startup reached", SentryLevel.INFO)
 
         Log.i("ZaycommStartup", "Loading React Native")
