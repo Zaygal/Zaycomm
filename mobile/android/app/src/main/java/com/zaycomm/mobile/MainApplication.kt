@@ -1,18 +1,20 @@
 package com.zaycomm.mobile
 
 import android.app.Application
-import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
 import com.facebook.react.ReactNativeHost
+import com.facebook.react.ReactPackage
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import com.facebook.react.defaults.DefaultReactNativeHost
+import com.horcrux.svg.SvgPackage
 
 class MainApplication : Application(), ReactApplication {
     override val reactNativeHost: ReactNativeHost = object : DefaultReactNativeHost(this) {
-        override fun getPackages() = PackageList(this).packages.apply {
-            add(ZaycommBlePackage())
-        }
+        override fun getPackages(): List<ReactPackage> = listOf(
+            SvgPackage(),
+            ZaycommBlePackage()
+        )
 
         override fun getJSMainModuleName(): String = "index"
         override fun getUseDeveloperSupport(): Boolean = BuildConfig.DEBUG
