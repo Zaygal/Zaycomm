@@ -67,6 +67,21 @@ jobs:
           done
           exit 1
 
+      - name: Verify diagnostic APK contains React Native bundle
+        working-directory: mobile/android
+        run: |
+          set -e
+          APK="app/build/outputs/apk/diagnostic/app-diagnostic.apk"
+          test -f "$APK"
+          echo "Inspecting $APK"
+          if ! unzip -l "$APK" | grep -Eq 'assets/(index\.android\.bundle|index\.android\.bundle\.packager\.map)$'; then
+            echo "ERROR: React Native Android bundle is missing from diagnostic APK."
+            echo "APK assets containing bundle/map entries:"
+            unzip -l "$APK" | grep -E 'assets/|bundle|\.map' | head -80 || true
+            exit 1
+          fi
+          echo "React Native Android bundle is present in diagnostic APK."
+
       - name: Upload diagnostic APK
         uses: actions/upload-artifact@v4
         with:
