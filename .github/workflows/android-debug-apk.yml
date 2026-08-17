@@ -40,13 +40,32 @@ jobs:
         run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.13'
+          cache-provider: basic
+          cache-read-only: false
+          cache-cleanup: on-success
 
       - name: Build debug APK
         working-directory: mobile/android
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
+        env:
+          GRADLE_OPTS: >-
+            -Dorg.gradle.internal.repository.max.retries=5
+            -Dorg.gradle.internal.repository.initial.backoff=2000
+        run: |
+          set -e
+          for attempt in 1 2 3; do
+            echo "Gradle build attempt ${attempt}/3"
+            if gradle --no-daemon --stacktrace :app:assembleDebug; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Gradle attempt ${attempt} failed; waiting before retry..."
+              sleep $((attempt * 20))
+            fi
+          done
+          exit 1
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
