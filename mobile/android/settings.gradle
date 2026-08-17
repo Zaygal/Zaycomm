@@ -7,12 +7,8 @@ plugins {
     id 'com.facebook.react.settings'
 }
 
-extensions.configure(com.facebook.react.ReactSettingsExtension) { ex ->
-    ex.autolinkLibrariesFromCommand()
-}
-
 dependencyResolutionManagement {
-    // React Native's Gradle plugin adds Maven Central during project configuration.
+    // React Native's Gradle plugin adds repositories during project configuration.
     // Prefer the settings repositories without failing when that plugin does so.
     repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
     repositories { google(); mavenCentral() }
