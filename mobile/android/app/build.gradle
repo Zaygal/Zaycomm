@@ -17,7 +17,9 @@ android {
 }
 
 react {
-    autolinkLibrariesWithApp()
+    // Native packages are registered explicitly in MainApplication for this
+    // small C25.4 mobile shell. This avoids generating an incompatible
+    // legacy PackageList from the standalone CLI.
 }
 
 // C25.4 debug APK: installable on a physical Android device for BLE validation.
