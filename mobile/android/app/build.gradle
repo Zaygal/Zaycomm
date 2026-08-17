@@ -14,12 +14,18 @@ android {
         versionCode 1
         versionName '0.1.0'
     }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/jni/CMakeLists.txt')
+        }
+    }
 }
 
 react {
-    // Native packages are registered explicitly in MainApplication for this
-    // small C25.4 mobile shell. This avoids generating an incompatible
-    // legacy PackageList from the standalone CLI.
+    // React Native 0.86 New Architecture requires the generated
+    // autolinking CMake files to be registered with the application.
+    autolinkLibrariesWithApp()
 }
 
 // C25.4 debug APK: installable on a physical Android device for BLE validation.
