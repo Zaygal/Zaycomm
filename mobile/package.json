@@ -10,6 +10,7 @@
     "ios": "react-native run-ios"
   },
   "dependencies": {
+    "@sentry/react-native": "8.21.0",
     "react": "19.2.3",
     "react-native": "0.86.2",
     "react-native-qrcode-svg": "^6.3.20",
