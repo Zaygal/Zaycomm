@@ -1,7 +1,7 @@
 {
   "name": "@zaycomm/mobile",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Zaycomm cross-platform mobile node shell; protocol core remains TypeScript.",
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "react": "19.2.0",
-    "react-native": "0.86.2"
+    "react-native": "0.86.2",
+    "react-native-qrcode-svg": "^6.3.20"
   },
   "devDependencies": {
     "@react-native-community/cli": "latest",
