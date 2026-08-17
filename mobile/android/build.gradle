@@ -2,3 +2,5 @@ plugins {
     id 'com.android.application' version '8.7.3' apply false
     id 'com.facebook.react' version '0.86.2' apply false
 }
+
+apply plugin: 'com.facebook.react.rootproject'
