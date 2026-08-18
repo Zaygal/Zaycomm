@@ -23,8 +23,36 @@ Sentry.addBreadcrumb({
   level: 'info',
 });
 
-// Diagnostic marker. This lets us verify that the new APK is actually
-// communicating with the Zaycomm Sentry project before reproducing the crash.
 Sentry.captureMessage('Zaycomm diagnostic build started', 'info');
+
+// Startup crash instrumentation. These markers intentionally do not change
+// application behavior; they establish exactly how far the process gets
+// through the known 700ms splash -> Home boundary.
+setTimeout(() => {
+  Sentry.addBreadcrumb({
+    category: 'zaycomm.startup',
+    message: '600ms: still alive before expected Home transition',
+    level: 'info',
+  });
+  Sentry.captureMessage('Zaycomm startup checkpoint: 600ms', 'info');
+}, 600);
+
+setTimeout(() => {
+  Sentry.addBreadcrumb({
+    category: 'zaycomm.startup',
+    message: '690ms: immediately before expected Home transition',
+    level: 'info',
+  });
+  Sentry.captureMessage('Zaycomm startup checkpoint: 690ms', 'info');
+}, 690);
+
+setTimeout(() => {
+  Sentry.addBreadcrumb({
+    category: 'zaycomm.startup',
+    message: '900ms: process survived expected Home transition',
+    level: 'info',
+  });
+  Sentry.captureMessage('Zaycomm startup checkpoint: 900ms', 'info');
+}, 900);
 
 export default Sentry;
