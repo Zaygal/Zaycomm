@@ -110,6 +110,8 @@ export default function App() {
     append(`Connected to ${peer.address}`);
   };
 
+  const qrValue = pairing ? JSON.stringify(pairing) : '';
+
   return (
     <SafeAreaView style={styles.root}>
       <ScrollView contentContainerStyle={styles.content}>
@@ -139,7 +141,15 @@ export default function App() {
             <Text style={styles.section}>2. Pair another device</Text>
             <Text style={styles.meta}>Scan this QR from another Zaycomm device. It contains public bootstrap data only.</Text>
             <View style={styles.qrWrap}>
-              <QRCode value={`zaycomm://pair?data=${encodeURIComponent(JSON.stringify(pairing))}`} size={190} backgroundColor="#ffffff" color="#07111f" />
+              <QRCode
+                value={qrValue}
+                size={220}
+                ecl="L"
+                quietZone={12}
+                backgroundColor="#ffffff"
+                color="#07111f"
+                onError={(error: unknown) => append(`QR error • ${String(error)}`)}
+              />
             </View>
             <Text style={styles.pairingCode}>{pairing.nodeId}</Text>
             <Text style={styles.meta}>BLE capability • protocol v{pairing.version}</Text>
