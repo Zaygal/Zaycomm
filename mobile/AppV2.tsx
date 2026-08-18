@@ -1,6 +1,7 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {Alert, Animated, Easing, NativeEventEmitter, NativeModules, PermissionsAndroid, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View} from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
+import {SvgXml} from 'react-native-svg';
 import {createIdentity, computeFingerprint, Identity} from '../src/identity/identity';
 
 const SERVICE_UUID = '8F4D0001-7E2C-4C7D-9F11-7A9D00000001';
@@ -19,6 +20,13 @@ type Thread = {id: string; name: string; preview: string; unread: number; state:
 const COLORS = {bg: '#080c22', surface: '#121a3d', border: '#212b57', ink: '#eef1ff', dim: '#8891bd', signal: '#57e0ff', pulse: '#7c6bff'};
 const mono = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 const ui = Platform.OS === 'android' ? 'sans-serif' : undefined;
+const ZAYCOMM_LOGO_SVG = `<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1170 788" xmlns="http://www.w3.org/2000/svg">
+<defs><linearGradient id="dotGrad" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#4ADE9C"/><stop offset="50%" stop-color="#3BC9C9"/><stop offset="100%" stop-color="#4FA8F0"/></linearGradient></defs>
+<rect width="1170" height="788" fill="#060A18"/>
+<g stroke="url(#dotGrad)" stroke-width="10" stroke-linecap="round" opacity="0.9"><line x1="505" y1="335" x2="595" y2="300"/><line x1="505" y1="435" x2="595" y2="395"/><line x1="505" y1="435" x2="505" y2="540"/></g>
+<g fill="url(#dotGrad)"><circle cx="410" cy="297" r="13"/><circle cx="410" cy="398" r="13"/><circle cx="410" cy="495" r="13"/><circle cx="505" cy="247" r="15"/><circle cx="505" cy="335" r="28"/><circle cx="505" cy="435" r="28"/><circle cx="505" cy="540" r="16"/><circle cx="595" cy="205" r="15"/><circle cx="595" cy="300" r="28"/><circle cx="595" cy="395" r="28"/><circle cx="595" cy="497" r="19"/><circle cx="595" cy="595" r="15"/><circle cx="672" cy="250" r="14"/><circle cx="680" cy="345" r="21"/><circle cx="672" cy="450" r="21"/><circle cx="672" cy="550" r="18"/><circle cx="763" cy="297" r="14"/><circle cx="763" cy="398" r="14"/><circle cx="763" cy="497" r="14"/></g></svg>`;
+
 
 function bytesToHex(bytes: Uint8Array): string { return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join(''); }
 function randomHex(length: number): string {
@@ -62,9 +70,10 @@ function SignalIcon({kind, active = false}: {kind: 'home' | 'chat' | 'pair' | 'n
   return <View style={[styles.settingsIcon, {borderColor: color}]}><View style={[styles.settingsCore, {backgroundColor: color}]} /></View>;
 }
 
-function StatePill({state}: {state: ProtocolState}) {
-  const live = state !== 'IDLE';
-  return <View style={[styles.statePill, live && styles.statePillLive]}><Pulse active={live} /><Text style={styles.statePillText}>{state}</Text></View>;
+function StatusDot({state}: {state: ProtocolState}) {
+  const active = state !== 'IDLE';
+  const color = state === 'IDLE' ? '#5f6685' : state === 'SCANNING' || state === 'LINKING' ? '#f4b740' : '#4ade80';
+  return <View style={styles.statusDotWrap}><Pulse active={active} /><View style={[styles.statusDot, {backgroundColor: color}]} /></View>;
 }
 
 function DeliveryState({state}: {state: Delivery}) {
@@ -144,14 +153,15 @@ export default function AppV2() {
     append('PAIR SCANNER • waiting for QR payload');
   };
 
-  if (loading) return <SafeAreaView style={styles.splash}><View style={styles.splashMark}><Text style={styles.splashGlyph}>Z</Text></View><Text style={styles.splashTitle}>ZAYCOMM</Text><Text style={styles.splashMeta}>PRIVATE / OFFLINE / MESH</Text><View style={styles.loadingTrack}><View style={styles.loadingBar} /></View></SafeAreaView>;
+  if (loading) return <SafeAreaView style={styles.splash}><View style={styles.splashMark}><SvgXml xml={ZAYCOMM_LOGO_SVG} width={110} height={74} /></View><Text style={styles.splashTitle}>ZAYCOMM</Text><Text style={styles.splashMeta}>PRIVATE / OFFLINE / MESH</Text><View style={styles.loadingTrack}><View style={styles.loadingBar} /></View></SafeAreaView>;
 
   const home = <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-    <View style={styles.heroRow}><View><Text style={styles.eyebrow}>LOCAL NODE</Text><Text style={styles.heroTitle}>{identity ? nodeName : 'ZAYCOMM'}</Text><Text style={styles.heroSub}>{identity ? 'IDENTITY READY / OFFLINE MESH' : 'INITIAL SETUP'}</Text></View><StatePill state={state} /></View>
+    <View style={styles.brandHeader}><SvgXml xml={ZAYCOMM_LOGO_SVG} width={28} height={20} /><Text style={styles.brandWordmark}>ZAYCOMM</Text><StatusDot state={state} /></View>
+    <View style={styles.heroRow}><View><Text style={styles.heroTitle}>{identity ? nodeName : 'ZAYCOMM'}</Text><Text style={styles.heroSub}>{identity ? 'IDENTITY READY / OFFLINE MESH' : 'INITIAL SETUP'}</Text></View></View>
 
-    <View style={styles.nodeCard}><View style={styles.rowBetween}><View><Text style={styles.mono}>NODE ID</Text><Text style={styles.nodeId}>{pairing?.nodeId ?? 'UNCONFIGURED'}</Text></View><View style={[styles.liveRing, state !== 'IDLE' && styles.liveRingActive]}><Pulse active={state !== 'IDLE'} /></View></View><View style={styles.divider} /><View style={styles.metrics}><View><Text style={styles.metricValue}>{peerCount}</Text><Text style={styles.metricLabel}>NEARBY</Text></View><View><Text style={styles.metricValue}>{connected.length}</Text><Text style={styles.metricLabel}>LINKED</Text></View><View><Text style={styles.metricValue}>{bridgeAvailable ? 'BLE' : '—'}</Text><Text style={styles.metricLabel}>TRANSPORT</Text></View></View></View>
+    <View style={styles.nodeCard}><Text style={styles.eyebrow}>LOCAL NODE</Text><Text style={styles.cardTitle}>{nodeName}</Text><View style={styles.rowBetween}><View><Text style={styles.mono}>NODE ID</Text><Text style={styles.nodeId}>{pairing?.nodeId ?? 'UNCONFIGURED'}</Text></View><View style={[styles.liveRing, state !== 'IDLE' && styles.liveRingActive]}><Pulse active={state !== 'IDLE'} /></View></View><View style={styles.divider} /><View style={styles.metrics}><View><Text style={styles.metricValue}>{peerCount}</Text><Text style={styles.metricLabel}>NEARBY</Text></View><View><Text style={styles.metricValue}>{connected.length}</Text><Text style={styles.metricLabel}>LINKED</Text></View><View><Text style={styles.metricValue}>{bridgeAvailable ? 'BLE' : '—'}</Text><Text style={styles.metricLabel}>TRANSPORT</Text></View></View></View>
 
-    {!identity ? <View style={styles.actionCard}><Text style={styles.eyebrow}>FIRST BOOT</Text><Text style={styles.cardTitle}>Create local identity</Text><Text style={styles.cardText}>Generate the Ed25519 identity that anchors this node. Private key material stays on-device.</Text><Pressable style={styles.primary} onPress={configureNode}><Text style={styles.primaryText}>CREATE NODE</Text><SignalIcon kind="arrow" active /></Pressable></View> : <View style={styles.actionCard}><View style={styles.rowBetween}><Text style={styles.eyebrow}>TRANSPORT</Text><Text style={styles.stateText}>{state}</Text></View><Text style={styles.cardTitle}>{state === 'CONNECTED' ? 'Mesh link is live' : state === 'SCANNING' ? 'Listening for nearby nodes' : 'Start the offline network'}</Text><Text style={styles.cardText}>Bluetooth LE is the current transport. Internet is not required.</Text><Pressable style={styles.primary} onPress={start}><Text style={styles.primaryText}>{transportActive ? 'TRANSPORT ACTIVE' : 'START OFFLINE TRANSPORT'}</Text><SignalIcon kind="arrow" active /></Pressable></View>}
+    {!identity ? <View style={styles.actionCard}><Text style={styles.eyebrow}>FIRST BOOT</Text><Text style={styles.cardTitle}>Create local identity</Text><Text style={styles.cardText}>Generate the Ed25519 identity that anchors this node. Private key material stays on-device.</Text><Pressable style={styles.primary} onPress={configureNode}><Text style={styles.primaryText}>CREATE NODE</Text><SignalIcon kind="arrow" active /></Pressable></View> : <View style={styles.actionCard}><Text style={styles.eyebrow}>TRANSPORT</Text><Text style={styles.cardTitle}>{state === 'CONNECTED' ? 'Mesh link is live' : state === 'SCANNING' ? 'Listening for nearby nodes' : 'Start the offline network'}</Text><Text style={styles.cardText}>Bluetooth LE is the current transport. Internet is not required.</Text><Pressable style={styles.primary} onPress={start}><Text style={styles.primaryText}>{transportActive ? 'TRANSPORT ACTIVE' : 'START OFFLINE TRANSPORT'}</Text><SignalIcon kind="arrow" active /></Pressable></View>}
 
     {transportActive && <View style={styles.activity}><View style={styles.rowBetween}><Text style={styles.mono}>LIVE ACTIVITY</Text><Text style={styles.activityState}>RADIO ACTIVE</Text></View><Text style={styles.terminalLine}>listening / advertisements</Text><Text style={styles.terminalLine}>peers in range / {peerCount}</Text><Text style={styles.terminalLine}>authenticated links / {connected.length}</Text></View>}
 
@@ -193,7 +203,7 @@ export default function AppV2() {
   ];
 
   return <SafeAreaView style={styles.root}>
-    <View style={styles.header}><View style={styles.brandWrap}><View style={styles.brandMark}><Text style={styles.brandGlyph}>Z</Text></View><View><Text style={styles.brand}>ZAYCOMM</Text><Text style={styles.headerSub}>{identity ? 'LOCAL NODE' : 'INITIAL SETUP'}</Text></View></View><StatePill state={state} /></View>
+    <View style={styles.header}><View style={styles.brandWrap}><View style={styles.brandMark}><Text style={styles.brandGlyph}>Z</Text></View><View><Text style={styles.brand}>ZAYCOMM</Text><Text style={styles.headerSub}>{identity ? 'LOCAL NODE' : 'INITIAL SETUP'}</Text></View></View><StatusDot state={state} /></View>
     <View style={styles.screen}>{screen}</View>
     <View style={styles.nav}>{tabs.map(item => <Pressable key={item.key} style={styles.navItem} onPress={() => setTab(item.key)}><SignalIcon kind={item.icon} active={tab === item.key} /><Text style={[styles.navLabel, tab === item.key && styles.navActive]}>{item.label}</Text></Pressable>)}</View>
   </SafeAreaView>;
@@ -203,6 +213,10 @@ const styles = StyleSheet.create({
   root: {flex: 1, backgroundColor: COLORS.bg}, screen: {flex: 1}, content: {padding: 20, paddingBottom: 34, gap: 14},
   splash: {flex: 1, backgroundColor: COLORS.bg, alignItems: 'center', justifyContent: 'center'}, splashMark: {width: 76, height: 76, borderRadius: 22, backgroundColor: COLORS.signal, alignItems: 'center', justifyContent: 'center', marginBottom: 18}, splashGlyph: {fontSize: 40, color: COLORS.bg, fontWeight: '900', fontFamily: ui}, splashTitle: {fontSize: 28, color: COLORS.ink, fontWeight: '800', letterSpacing: 5, fontFamily: ui}, splashMeta: {fontSize: 9, color: COLORS.dim, letterSpacing: 2, marginTop: 8, fontFamily: mono}, loadingTrack: {width: 112, height: 3, backgroundColor: COLORS.border, marginTop: 25, borderRadius: 3}, loadingBar: {width: 72, height: 3, backgroundColor: COLORS.signal, borderRadius: 3},
   header: {height: 70, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLORS.bg, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: COLORS.border}, brandWrap: {flexDirection: 'row', alignItems: 'center', gap: 9}, brandMark: {width: 30, height: 30, borderRadius: 9, backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border, alignItems: 'center', justifyContent: 'center'}, brandGlyph: {fontSize: 16, color: COLORS.signal, fontWeight: '900'}, brand: {fontSize: 13, color: COLORS.ink, fontWeight: '800', letterSpacing: 2, fontFamily: ui}, headerSub: {fontSize: 7, color: COLORS.dim, letterSpacing: 1.5, marginTop: 2, fontFamily: mono},
+  brandHeader: {flexDirection: 'row', alignItems: 'center', minHeight: 34, marginBottom: 18, gap: 8},
+  brandWordmark: {fontFamily: ui, fontSize: 15, fontWeight: '700', letterSpacing: 2.4, color: COLORS.ink},
+  statusDotWrap: {width: 18, height: 18, alignItems: 'center', justifyContent: 'center', marginLeft: 2},
+  statusDot: {width: 8, height: 8, borderRadius: 4},
   heroRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'}, eyebrow: {fontSize: 9, color: COLORS.signal, letterSpacing: 1.8, fontWeight: '700', fontFamily: ui}, heroTitle: {fontSize: 31, color: COLORS.ink, fontWeight: '800', letterSpacing: 0.2, marginTop: 3, fontFamily: ui}, heroSub: {fontSize: 8, color: COLORS.dim, letterSpacing: 1.1, marginTop: 2, fontFamily: mono}, pageTitle: {fontSize: 30, color: COLORS.ink, fontWeight: '800', marginTop: 3, fontFamily: ui}, pageSub: {fontSize: 13, lineHeight: 19, color: COLORS.dim, fontFamily: ui},
   statePill: {flexDirection: 'row', alignItems: 'center', gap: 7, borderWidth: 1, borderColor: COLORS.border, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 7}, statePillLive: {borderColor: COLORS.signal}, statePillText: {fontSize: 8, color: COLORS.dim, letterSpacing: 1.2, fontWeight: '800', fontFamily: mono}, pulse: {width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.signal},
   nodeCard: {backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border, borderRadius: 18, padding: 18, gap: 13}, rowBetween: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'}, mono: {fontSize: 8, color: COLORS.dim, letterSpacing: 1.6, fontWeight: '700', fontFamily: mono}, nodeId: {fontSize: 11, color: COLORS.signal, letterSpacing: 0.8, marginTop: 4, fontFamily: mono}, liveRing: {width: 30, height: 30, borderRadius: 15, borderWidth: 1, borderColor: COLORS.border, alignItems: 'center', justifyContent: 'center'}, liveRingActive: {borderColor: COLORS.signal}, divider: {height: StyleSheet.hairlineWidth, backgroundColor: COLORS.border}, metrics: {flexDirection: 'row', justifyContent: 'space-between'}, metricValue: {fontSize: 22, color: COLORS.ink, fontWeight: '800', fontFamily: ui}, metricLabel: {fontSize: 8, color: COLORS.dim, letterSpacing: 1.2, marginTop: 2, fontFamily: mono},
