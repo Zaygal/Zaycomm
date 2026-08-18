@@ -1,0 +1,22 @@
+<svg width="1170" height="788" viewBox="0 0 1170 788" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="dotGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#4ADE9C"/>
+      <stop offset="50%" stop-color="#3BC9C9"/>
+      <stop offset="100%" stop-color="#4FA8F0"/>
+    </linearGradient>
+  </defs>
+  <rect width="1170" height="788" fill="#060A18"/>
+  <g stroke="url(#dotGrad)" stroke-width="10" stroke-linecap="round" opacity="0.9">
+    <line x1="505" y1="335" x2="595" y2="300"/>
+    <line x1="505" y1="435" x2="595" y2="395"/>
+    <line x1="505" y1="435" x2="505" y2="540"/>
+  </g>
+  <g fill="url(#dotGrad)">
+    <circle cx="410" cy="297" r="13"/><circle cx="410" cy="398" r="13"/><circle cx="410" cy="495" r="13"/>
+    <circle cx="505" cy="247" r="15"/><circle cx="505" cy="335" r="28"/><circle cx="505" cy="435" r="28"/><circle cx="505" cy="540" r="16"/>
+    <circle cx="595" cy="205" r="15"/><circle cx="595" cy="300" r="28"/><circle cx="595" cy="395" r="28"/><circle cx="595" cy="497" r="19"/><circle cx="595" cy="595" r="15"/>
+    <circle cx="672" cy="250" r="14"/><circle cx="680" cy="345" r="21"/><circle cx="672" cy="450" r="21"/><circle cx="672" cy="550" r="18"/>
+    <circle cx="763" cy="297" r="14"/><circle cx="763" cy="398" r="14"/><circle cx="763" cy="497" r="14"/>
+  </g>
+</svg>
