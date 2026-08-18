@@ -7,7 +7,7 @@ import com.facebook.react.uimanager.ViewManager
 
 class ZaycommBlePackage : ReactPackage {
     override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> =
-        listOf(ZaycommBleModule(reactContext))
+        listOf(ZaycommBleModule(reactContext), ZaycommNotificationModule(reactContext))
 
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> = emptyList()
 }
