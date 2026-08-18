@@ -1,5 +1,5 @@
-import React, {useEffect, useMemo, useState} from 'react';
-import {NativeEventEmitter, NativeModules, PermissionsAndroid, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View} from 'react-native';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
+import {Animated, Easing, NativeEventEmitter, NativeModules, PermissionsAndroid, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View} from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
 import {createIdentity, computeFingerprint, Identity} from '../src/identity/identity';
 
@@ -10,9 +10,9 @@ const events = nativeBle ? new NativeEventEmitter(nativeBle) : null;
 
 type Peer = {id: string; address: string};
 type PairingPayload = {scheme: 'zaycomm'; version: number; nodeId: string; publicKey: string; capabilities: string[]; nonce: string};
-type Tab = 'home' | 'pair' | 'transport' | 'settings';
+type Tab = 'home' | 'pair' | 'nearby' | 'settings';
 
-function bytesToHex(bytes: Uint8Array): string { return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(''); }
+function bytesToHex(bytes: Uint8Array): string { return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join(''); }
 function randomHex(length: number): string {
   const bytes = new Uint8Array(Math.ceil(length / 2));
   if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
@@ -20,7 +20,6 @@ function randomHex(length: number): string {
   return bytesToHex(bytes).slice(0, length);
 }
 function createNodeId(publicKey: Uint8Array): string { return computeFingerprint(publicKey).replace(/\s/g, '').slice(0, 16); }
-
 async function requestAndroidBlePermissions() {
   if (Platform.OS !== 'android' || Platform.Version < 31) return true;
   const result = await PermissionsAndroid.requestMultiple([
@@ -28,12 +27,39 @@ async function requestAndroidBlePermissions() {
     PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
     PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
   ]);
-  return Object.values(result).every(value => value === PermissionsAndroid.RESULTS.GRANTED);
+  return Object.values(result).every(v => v === PermissionsAndroid.RESULTS.GRANTED);
 }
 
-function Icon({name, active = false}: {name: string; active?: boolean}) {
-  const symbols: Record<string, string> = {home: '⌂', pair: '⌁', transport: '◉', settings: '⚙'};
-  return <Text style={[styles.navIcon, active && styles.navIconActive]}>{symbols[name] || '•'}</Text>;
+function Pulse({active}: {active: boolean}) {
+  const scale = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (!active) { scale.stopAnimation(); scale.setValue(1); return; }
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(scale, {toValue: 1.5, duration: 850, easing: Easing.inOut(Easing.ease), useNativeDriver: true}),
+      Animated.timing(scale, {toValue: 1, duration: 850, easing: Easing.inOut(Easing.ease), useNativeDriver: true}),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [active, scale]);
+  return <Animated.View style={styles.pulse} />;
+}
+
+function LiveCount({value}: {value: number}) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const last = useRef(value);
+  useEffect(() => {
+    if (last.current !== value) {
+      last.current = value;
+      scale.setValue(1.35);
+      Animated.spring(scale, {toValue: 1, friction: 5, tension: 120, useNativeDriver: true}).start();
+    }
+  }, [value, scale]);
+  return <Animated.Text style={[styles.metricValue, {transform: [{scale}]}]}>{value}</Animated.Text>;
+}
+
+function NavIcon({tab, active}: {tab: Tab; active: boolean}) {
+  const glyph = tab === 'home' ? '⌂' : tab === 'pair' ? '⌁' : tab === 'nearby' ? '◎' : '⚙';
+  return <Text style={[styles.navIcon, active && styles.navActive]}>{glyph}</Text>;
 }
 
 export default function App() {
@@ -45,16 +71,13 @@ export default function App() {
   const [peers, setPeers] = useState<Peer[]>([]);
   const [connected, setConnected] = useState<string[]>([]);
   const [status, setStatus] = useState('Not configured');
+  const [transportActive, setTransportActive] = useState(false);
   const [log, setLog] = useState<string[]>([]);
-
-  const append = (line: string) => setLog(current => [line, ...current].slice(0, 40));
   const bridgeAvailable = !!nativeBle;
   const peerCount = useMemo(() => peers.length, [peers]);
+  const append = (line: string) => setLog(current => [line, ...current].slice(0, 30));
 
-  useEffect(() => {
-    const timer = setTimeout(() => setLoading(false), 650);
-    return () => clearTimeout(timer);
-  }, []);
+  useEffect(() => { const timer = setTimeout(() => setLoading(false), 700); return () => clearTimeout(timer); }, []);
 
   useEffect(() => {
     if (!events) return;
@@ -63,7 +86,7 @@ export default function App() {
     });
     const connection = events.addListener('ZaycommBleConnectionChanged', (event: {address: string; connected: boolean}) => {
       setConnected(current => event.connected ? Array.from(new Set([...current, event.address])) : current.filter(a => a !== event.address));
-      append(`${event.connected ? 'Connected' : 'Disconnected'} ${event.address}`);
+      append(`${event.connected ? 'LINK UP' : 'LINK DOWN'} • ${event.address}`);
     });
     return () => { advertisement.remove(); connection.remove(); };
   }, []);
@@ -71,107 +94,107 @@ export default function App() {
   const configureNode = () => {
     const nextIdentity = createIdentity();
     const payload: PairingPayload = {scheme: 'zaycomm', version: PROTOCOL_VERSION, nodeId: createNodeId(nextIdentity.publicKey), publicKey: bytesToHex(nextIdentity.publicKey), capabilities: ['ble'], nonce: randomHex(32)};
-    setIdentity(nextIdentity); setPairing(payload); setStatus('Node configured'); append(`Identity generated • ${payload.nodeId}`); setTab('home');
+    setIdentity(nextIdentity); setPairing(payload); setStatus('Node configured'); append(`IDENTITY READY • ${payload.nodeId}`); setTab('home');
   };
 
   const start = async () => {
     if (!identity || !pairing) { setStatus('Configure this node first'); setTab('home'); return; }
     if (!bridgeAvailable) { setStatus('Native BLE bridge unavailable'); return; }
-    if (!(await requestAndroidBlePermissions())) { setStatus('Bluetooth permissions denied'); return; }
+    if (!(await requestAndroidBlePermissions())) { setStatus('Bluetooth permissions denied'); append('BLE BLOCKED • permission denied'); return; }
     try {
       await nativeBle.startAdvertising(nodeName);
       nativeBle.startScan();
-      setStatus('Discovering Zaycomm nodes');
-      append(`BLE active • service ${SERVICE_UUID}`);
+      setTransportActive(true); setStatus('Discovering Zaycomm nodes'); append(`BLE ACTIVE • ${SERVICE_UUID.slice(0, 8)}…`);
     } catch (error) {
-      setStatus('Bluetooth transport failed to start');
-      append(`BLE error • ${String(error)}`);
+      setTransportActive(false); setStatus('Bluetooth transport failed'); append(`BLE ERROR • ${String(error)}`);
     }
   };
 
   const connect = async (peer: Peer) => {
-    try { await nativeBle.connect(peer.address); append(`Connected to ${peer.address}`); }
-    catch (error) { append(`Connection error • ${String(error)}`); }
+    append(`CONNECTING • ${peer.id || peer.address}`);
+    try { await nativeBle.connect(peer.address); append(`LINK REQUEST SENT • ${peer.address}`); }
+    catch (error) { append(`CONNECT ERROR • ${String(error)}`); }
   };
-
-  const qrValue = pairing ? JSON.stringify(pairing) : '';
 
   if (loading) return (
     <SafeAreaView style={styles.splash}>
-      <View style={styles.logoMark}><Text style={styles.logoGlyph}>Z</Text></View>
+      <View style={styles.splashMark}><Text style={styles.splashGlyph}>Z</Text></View>
       <Text style={styles.splashTitle}>ZAYCOMM</Text>
-      <Text style={styles.splashMeta}>PRIVATE • OFFLINE • CONNECTED</Text>
+      <Text style={styles.splashMeta}>OFFLINE MESH / INITIALIZING</Text>
       <View style={styles.loadingTrack}><View style={styles.loadingBar} /></View>
     </SafeAreaView>
   );
 
-  const renderHome = () => (
+  const home = (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <View style={styles.heroRow}>
-        <View><Text style={styles.eyebrow}>OFFLINE NODE</Text><Text style={styles.title}>Your node</Text></View>
-        <View style={styles.liveDot}><View style={styles.dot} /><Text style={styles.liveText}>{identity ? 'READY' : 'SETUP'}</Text></View>
+        <View><Text style={styles.eyebrow}>LOCAL NODE</Text><Text style={styles.hero}>ZAYCOMM</Text><Text style={styles.heroSub}>IDENTITY-FIRST / OFFLINE</Text></View>
+        <View style={styles.livePill}><Pulse active={transportActive} /><Text style={styles.liveText}>{transportActive ? 'LIVE' : 'IDLE'}</Text></View>
       </View>
 
       <View style={styles.nodeCard}>
-        <View style={styles.nodeTop}><View style={styles.nodeAvatar}><Text style={styles.nodeAvatarText}>Z</Text></View><View style={styles.nodeInfo}><Text style={styles.nodeName}>{nodeName}</Text><Text style={styles.nodeSub}>{identity ? `ID ${pairing?.nodeId}` : 'Identity not configured'}</Text></View></View>
+        <View style={styles.nodeHeader}><View><Text style={styles.mono}>NODE STATUS</Text><Text style={styles.nodeName}>{nodeName}</Text></View><View style={[styles.statusDot, transportActive && styles.statusDotLive]} /></View>
+        <Text style={styles.nodeId}>{pairing?.nodeId ?? 'UNCONFIGURED'}</Text>
         <View style={styles.divider} />
-        <View style={styles.stats}><View><Text style={styles.statValue}>{peerCount}</Text><Text style={styles.statLabel}>NEARBY</Text></View><View><Text style={styles.statValue}>{connected.length}</Text><Text style={styles.statLabel}>CONNECTED</Text></View><View><Text style={styles.statValue}>{bridgeAvailable ? 'ON' : 'OFF'}</Text><Text style={styles.statLabel}>BRIDGE</Text></View></View>
+        <View style={styles.metrics}><View><LiveCount value={peerCount} /><Text style={styles.metricLabel}>NEARBY</Text></View><View><Text style={styles.metricValue}>{connected.length}</Text><Text style={styles.metricLabel}>LINKED</Text></View><View><Text style={styles.metricValue}>{bridgeAvailable ? 'BLE' : '—'}</Text><Text style={styles.metricLabel}>BRIDGE</Text></View></View>
       </View>
 
-      {!identity ? <View style={styles.card}><Text style={styles.section}>Create your identity</Text><Text style={styles.meta}>Your Ed25519 identity stays on this device. Private identity material never enters the pairing QR.</Text><Pressable style={styles.primary} onPress={configureNode}><Text style={styles.primaryText}>CREATE NODE</Text><Text style={styles.arrow}>→</Text></Pressable></View> : (
-        <View style={styles.card}><View style={styles.cardHeader}><Text style={styles.section}>Node status</Text><Text style={styles.statusPill}>{status}</Text></View><Text style={styles.meta}>Bluetooth Low Energy is the transport layer. Internet access is not required.</Text><Pressable style={styles.primary} onPress={start}><Text style={styles.primaryText}>{status === 'Discovering Zaycomm nodes' ? 'TRANSPORT ACTIVE' : 'START OFFLINE TRANSPORT'}</Text><Text style={styles.arrow}>→</Text></Pressable></View>
+      {!identity ? (
+        <View style={styles.actionCard}><Text style={styles.eyebrow}>FIRST BOOT</Text><Text style={styles.cardTitle}>Create local identity</Text><Text style={styles.cardText}>Generate the Ed25519 identity that anchors this node. Private material stays on-device.</Text><Pressable style={styles.primary} onPress={configureNode}><Text style={styles.primaryText}>CREATE NODE</Text><Text style={styles.primaryArrow}>→</Text></Pressable></View>
+      ) : (
+        <View style={styles.actionCard}><View style={styles.rowBetween}><Text style={styles.eyebrow}>TRANSPORT</Text><Text style={styles.stateText}>{transportActive ? 'SCANNING' : 'READY'}</Text></View><Text style={styles.cardTitle}>{transportActive ? 'Listening for nearby nodes' : 'Start the offline network'}</Text><Text style={styles.cardText}>Bluetooth LE is the transport. Internet is not required.</Text><Pressable style={styles.primary} onPress={start}><Text style={styles.primaryText}>{transportActive ? 'TRANSPORT ACTIVE' : 'START OFFLINE TRANSPORT'}</Text><Text style={styles.primaryArrow}>→</Text></Pressable></View>
       )}
 
-      <Text style={styles.sectionHeading}>Quick actions</Text>
-      <View style={styles.actionGrid}><Pressable style={styles.action} onPress={() => setTab('pair')}><Text style={styles.actionIcon}>▣</Text><Text style={styles.actionTitle}>Pair device</Text><Text style={styles.actionMeta}>QR bootstrap</Text></Pressable><Pressable style={styles.action} onPress={() => setTab('transport')}><Text style={styles.actionIcon}>◉</Text><Text style={styles.actionTitle}>Nearby nodes</Text><Text style={styles.actionMeta}>{peerCount} discovered</Text></Pressable></View>
+      {transportActive && <View style={styles.activity}><View style={styles.rowBetween}><Text style={styles.mono}>LIVE ACTIVITY</Text><Text style={styles.activityState}>● RADIO ACTIVE</Text></View><Text style={styles.terminalLine}>▰ listening / advertisements</Text><Text style={styles.terminalLine}>▰ peers in range / {peerCount}</Text><Text style={styles.terminalLine}>▰ authenticated links / {connected.length}</Text></View>}
 
-      <View style={styles.card}><View style={styles.cardHeader}><Text style={styles.section}>Security</Text><Text style={styles.secure}>● LOCAL</Text></View><Text style={styles.meta}>Identity-first architecture • public bootstrap only • encrypted transport foundation.</Text></View>
+      <Text style={styles.sectionHeading}>Quick access</Text>
+      <View style={styles.quickRow}><Pressable style={styles.quick} onPress={() => setTab('pair')}><Text style={styles.quickGlyph}>⌁</Text><Text style={styles.quickTitle}>PAIR</Text><Text style={styles.quickMeta}>Public QR bootstrap</Text></Pressable><Pressable style={styles.quick} onPress={() => setTab('nearby')}><Text style={styles.quickGlyph}>◎</Text><Text style={styles.quickTitle}>NEARBY</Text><Text style={styles.quickMeta}>{peerCount} live discovery result{peerCount === 1 ? '' : 's'}</Text></Pressable></View>
     </ScrollView>
   );
 
-  const renderPair = () => (
+  const pair = (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <Text style={styles.eyebrow}>PAIRING</Text><Text style={styles.title}>Connect privately</Text><Text style={styles.subtitle}>Exchange public bootstrap data. Private identity material stays local.</Text>
-      {!pairing ? <View style={styles.card}><Text style={styles.section}>No node identity yet</Text><Text style={styles.meta}>Create this device's identity before generating a pairing QR.</Text><Pressable style={styles.primary} onPress={configureNode}><Text style={styles.primaryText}>CREATE NODE</Text><Text style={styles.arrow}>→</Text></Pressable></View> : <>
-        <View style={styles.qrCard}><Text style={styles.qrTitle}>SCAN TO PAIR</Text><View style={styles.qrWrap}><QRCode value={qrValue} size={220} ecl="L" quietZone={12} backgroundColor="#ffffff" color="#07111f" onError={(error: unknown) => append(`QR error • ${String(error)}`)} /></View><Text style={styles.pairingCode}>{pairing.nodeId}</Text><Text style={styles.metaCenter}>Public bootstrap • BLE • protocol v{pairing.version}</Text></View>
-        <View style={styles.card}><Text style={styles.section}>Your fingerprint</Text><Text style={styles.fingerprint}>{computeFingerprint(identity!.publicKey)}</Text><Text style={styles.meta}>Verify this fingerprint when establishing trust with another node.</Text></View>
+      <Text style={styles.eyebrow}>SECURE BOOTSTRAP</Text><Text style={styles.pageTitle}>Pairing</Text><Text style={styles.pageSub}>Exchange public data first. Trust and transport remain device-local.</Text>
+      {!pairing ? <View style={styles.actionCard}><Text style={styles.cardTitle}>No node identity</Text><Text style={styles.cardText}>Create this device's identity to generate a pairing QR.</Text><Pressable style={styles.primary} onPress={configureNode}><Text style={styles.primaryText}>CREATE NODE</Text><Text style={styles.primaryArrow}>→</Text></Pressable></View> : <>
+        <View style={styles.qrCard}><Text style={styles.qrLabel}>SCAN THIS NODE</Text><View style={styles.qrWrap}><QRCode value={JSON.stringify(pairing)} size={220} ecl="L" quietZone={12} backgroundColor="#fff" color="#07111f" onError={(error: unknown) => append(`QR ERROR • ${String(error)}`)} /></View><Text style={styles.qrId}>{pairing.nodeId}</Text><Text style={styles.qrMeta}>ZAYCOMM / BLE / V{pairing.version}</Text></View>
+        <View style={styles.terminal}><Text style={styles.mono}>PUBLIC BOOTSTRAP</Text><Text style={styles.terminalLine}>scheme :: zaycomm</Text><Text style={styles.terminalLine}>capability :: ble</Text><Text style={styles.terminalLine}>key :: {pairing.publicKey.slice(0, 24)}…</Text></View>
       </>}
     </ScrollView>
   );
 
-  const renderTransport = () => (
+  const nearby = (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <View style={styles.heroRow}><View><Text style={styles.eyebrow}>TRANSPORT</Text><Text style={styles.title}>Nearby</Text></View><View style={[styles.transportBadge, status === 'Discovering Zaycomm nodes' && styles.transportBadgeActive]}><Text style={styles.transportBadgeText}>{status === 'Discovering Zaycomm nodes' ? 'SCANNING' : 'IDLE'}</Text></View></View>
-      <View style={styles.card}><View style={styles.transportRow}><View style={styles.transportIcon}><Text style={styles.actionIcon}>◉</Text></View><View style={styles.nodeInfo}><Text style={styles.section}>Bluetooth LE</Text><Text style={styles.meta}>{bridgeAvailable ? 'Native bridge available' : 'Native bridge unavailable'}</Text></View></View><Pressable style={styles.primary} onPress={start}><Text style={styles.primaryText}>START SCAN</Text><Text style={styles.arrow}>→</Text></Pressable></View>
-      <Text style={styles.sectionHeading}>Discovered nodes · {peerCount}</Text>
-      <View style={styles.card}>{peers.length === 0 ? <View style={styles.emptyState}><Text style={styles.emptyIcon}>⌁</Text><Text style={styles.section}>Nothing nearby yet</Text><Text style={styles.metaCenter}>Start transport on two Zaycomm devices to discover each other.</Text></View> : peers.map(peer => <View key={peer.address} style={styles.peer}><View style={styles.peerAvatar}><Text style={styles.peerAvatarText}>Z</Text></View><View style={styles.nodeInfo}><Text style={styles.peerName}>{peer.id || 'Zaycomm peer'}</Text><Text style={styles.meta}>{peer.address}</Text></View><Pressable style={styles.connectButton} onPress={() => connect(peer)}><Text style={styles.connectText}>CONNECT</Text></Pressable></View>)}</View>
-      {log.length > 0 && <View style={styles.card}><Text style={styles.section}>Activity</Text>{log.slice(0, 8).map((line, index) => <Text key={`${line}-${index}`} style={styles.log}>{line}</Text>)}</View>}
+      <View style={styles.heroRow}><View><Text style={styles.eyebrow}>BLE DISCOVERY</Text><Text style={styles.pageTitle}>Nearby</Text></View><View style={styles.countBox}><LiveCount value={peerCount} /></View></View>
+      <View style={styles.activity}><View style={styles.rowBetween}><Text style={styles.mono}>{transportActive ? '● SCANNING' : '○ SCANNER IDLE'}</Text><Text style={styles.activityState}>{connected.length} LINKED</Text></View><Text style={styles.cardText}>{transportActive ? 'Discovery reacts to advertisements as they arrive.' : 'Start transport to discover nearby Zaycomm nodes.'}</Text></View>
+      {peers.length === 0 ? <View style={styles.empty}><Text style={styles.emptyGlyph}>⌁</Text><Text style={styles.cardTitle}>No nodes detected</Text><Text style={styles.cardText}>Run Zaycomm on another device nearby and start its BLE transport.</Text></View> : peers.map(peer => <View key={peer.address} style={styles.peer}><View style={styles.peerMark}><Pulse active={transportActive} /></View><View style={styles.peerInfo}><Text style={styles.peerName}>{peer.id || 'ZAYCOMM NODE'}</Text><Text style={styles.peerAddress}>{peer.address}</Text></View><Pressable style={styles.connect} onPress={() => connect(peer)}><Text style={styles.connectText}>LINK</Text></Pressable></View>)}
+      {log.length > 0 && <View style={styles.terminal}><Text style={styles.mono}>NODE ACTIVITY</Text>{log.slice(0, 8).map((line, index) => <Text key={`${line}-${index}`} style={styles.log}>{line}</Text>)}</View>}
     </ScrollView>
   );
 
-  const renderSettings = () => (
+  const settings = (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <Text style={styles.eyebrow}>SYSTEM</Text><Text style={styles.title}>Settings</Text>
-      <View style={styles.card}><Text style={styles.section}>Node profile</Text><Text style={styles.label}>Node name</Text><TextInput value={nodeName} onChangeText={setNodeName} style={styles.input} placeholder="Zaycomm Node" placeholderTextColor="#718096" /><Text style={styles.meta}>This name is used when advertising over BLE.</Text></View>
-      <View style={styles.card}><Text style={styles.section}>Identity</Text><View style={styles.settingRow}><Text style={styles.meta}>Identity status</Text><Text style={styles.settingValue}>{identity ? 'Configured' : 'Not configured'}</Text></View>{identity && <><View style={styles.settingRow}><Text style={styles.meta}>Node ID</Text><Text style={styles.settingValue}>{pairing?.nodeId}</Text></View><View style={styles.settingRow}><Text style={styles.meta}>Key type</Text><Text style={styles.settingValue}>Ed25519</Text></View></>}</View>
-      <View style={styles.card}><Text style={styles.section}>About Zaycomm</Text><Text style={styles.meta}>Identity-first offline communication over Bluetooth LE.</Text><Text style={styles.meta}>Protocol version {PROTOCOL_VERSION} • React Native mobile shell</Text></View>
+      <Text style={styles.eyebrow}>SYSTEM</Text><Text style={styles.pageTitle}>Settings</Text>
+      <View style={styles.card}><Text style={styles.section}>Node profile</Text><Text style={styles.label}>NODE NAME</Text><TextInput value={nodeName} onChangeText={setNodeName} style={styles.input} placeholder="Zaycomm Node" placeholderTextColor="#536a7c" /><Text style={styles.cardText}>Used when this device advertises over BLE.</Text></View>
+      <View style={styles.card}><Text style={styles.section}>Identity</Text><View style={styles.rowBetween}><Text style={styles.cardText}>Status</Text><Text style={styles.stateText}>{identity ? 'CONFIGURED' : 'NOT CONFIGURED'}</Text></View>{identity && <><View style={styles.divider} /><Text style={styles.mono}>NODE ID</Text><Text style={styles.nodeId}>{pairing?.nodeId}</Text><Text style={styles.mono}>FINGERPRINT</Text><Text style={styles.fingerprint}>{computeFingerprint(identity.publicKey)}</Text></>}</View>
+      <View style={styles.card}><Text style={styles.section}>Runtime</Text><Text style={styles.cardText}>Protocol v{PROTOCOL_VERSION}</Text><Text style={styles.cardText}>{bridgeAvailable ? 'Native BLE bridge loaded' : 'Native BLE bridge unavailable'}</Text><Text style={styles.cardText}>Internet dependency: none</Text></View>
     </ScrollView>
   );
 
-  const screen = tab === 'home' ? renderHome() : tab === 'pair' ? renderPair() : tab === 'transport' ? renderTransport() : renderSettings();
-  return <SafeAreaView style={styles.root}><View style={styles.appHeader}><View><Text style={styles.brand}>ZAYCOMM</Text><Text style={styles.headerStatus}>{identity ? 'Private offline node' : 'Welcome'}</Text></View><View style={styles.headerBadge}><View style={styles.dot} /><Text style={styles.headerBadgeText}>LOCAL</Text></View></View><View style={styles.screen}>{screen}</View><View style={styles.bottomNav}>{(['home','pair','transport','settings'] as Tab[]).map(item => <Pressable key={item} style={styles.navItem} onPress={() => setTab(item)}><Icon name={item} active={tab === item} /><Text style={[styles.navLabel, tab === item && styles.navLabelActive]}>{item === 'home' ? 'Home' : item === 'pair' ? 'Pair' : item === 'transport' ? 'Nearby' : 'Settings'}</Text></Pressable>)}</View></SafeAreaView>;
+  const screen = tab === 'home' ? home : tab === 'pair' ? pair : tab === 'nearby' ? nearby : settings;
+  const tabs: Tab[] = ['home', 'pair', 'nearby', 'settings'];
+  return <SafeAreaView style={styles.root}><View style={styles.header}><View><Text style={styles.brand}>ZAYCOMM</Text><Text style={styles.headerSub}>{identity ? 'PRIVATE OFFLINE NODE' : 'INITIAL SETUP'}</Text></View><View style={styles.local}><View style={styles.localDot} /><Text style={styles.localText}>LOCAL</Text></View></View><View style={styles.screen}>{screen}</View><View style={styles.nav}>{tabs.map(item => <Pressable key={item} style={styles.navItem} onPress={() => setTab(item)}><NavIcon tab={item} active={tab === item} /><Text style={[styles.navLabel, tab === item && styles.navActive]}>{item === 'home' ? 'HOME' : item === 'pair' ? 'PAIR' : item === 'nearby' ? 'NEARBY' : 'SETTINGS'}</Text></Pressable>)}</View></SafeAreaView>;
 }
 
 const styles = StyleSheet.create({
-  root: {flex: 1, backgroundColor: '#07111f'}, screen: {flex: 1}, content: {padding: 20, paddingBottom: 28, gap: 14},
-  splash: {flex: 1, backgroundColor: '#07111f', alignItems: 'center', justifyContent: 'center'}, logoMark: {width: 72, height: 72, borderRadius: 22, backgroundColor: '#00d4ff', alignItems: 'center', justifyContent: 'center', marginBottom: 18}, logoGlyph: {fontSize: 38, fontWeight: '900', color: '#03101b'}, splashTitle: {fontSize: 28, fontWeight: '900', letterSpacing: 5, color: '#fff'}, splashMeta: {fontSize: 9, letterSpacing: 2, color: '#6f849a', marginTop: 8}, loadingTrack: {width: 110, height: 3, backgroundColor: '#172a40', borderRadius: 3, marginTop: 28, overflow: 'hidden'}, loadingBar: {width: 65, height: 3, backgroundColor: '#00d4ff'},
-  appHeader: {height: 68, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#15263a'}, brand: {fontSize: 14, fontWeight: '900', letterSpacing: 3, color: '#fff'}, headerStatus: {fontSize: 10, color: '#71869b', marginTop: 3}, headerBadge: {flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#0d1b2e', paddingHorizontal: 10, paddingVertical: 7, borderRadius: 20}, headerBadgeText: {fontSize: 9, fontWeight: '800', color: '#90e0ef'}, dot: {width: 6, height: 6, borderRadius: 3, backgroundColor: '#00d4ff'},
-  heroRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'}, eyebrow: {fontSize: 10, fontWeight: '800', letterSpacing: 2, color: '#00d4ff'}, title: {fontSize: 30, fontWeight: '800', color: '#fff', marginTop: 3}, subtitle: {fontSize: 13, color: '#8194a9', lineHeight: 19}, liveDot: {flexDirection: 'row', alignItems: 'center', gap: 6}, liveText: {fontSize: 9, fontWeight: '800', color: '#90e0ef'},
-  nodeCard: {backgroundColor: '#0d1b2e', borderRadius: 22, padding: 18, borderWidth: 1, borderColor: '#17304a'}, nodeTop: {flexDirection: 'row', alignItems: 'center'}, nodeAvatar: {width: 52, height: 52, borderRadius: 17, backgroundColor: '#00d4ff', alignItems: 'center', justifyContent: 'center'}, nodeAvatarText: {fontSize: 26, fontWeight: '900', color: '#03101b'}, nodeInfo: {flex: 1, marginLeft: 12}, nodeName: {fontSize: 17, fontWeight: '700', color: '#fff'}, nodeSub: {fontSize: 10, color: '#72879d', marginTop: 4}, divider: {height: StyleSheet.hairlineWidth, backgroundColor: '#1c3047', marginVertical: 17}, stats: {flexDirection: 'row', justifyContent: 'space-between', paddingRight: 28}, statValue: {fontSize: 18, fontWeight: '800', color: '#fff'}, statLabel: {fontSize: 8, letterSpacing: 1.2, color: '#71869b', marginTop: 3},
-  card: {backgroundColor: '#0d1b2e', borderRadius: 18, padding: 17, gap: 10, borderWidth: 1, borderColor: '#12263d'}, cardHeader: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'}, section: {fontSize: 16, fontWeight: '700', color: '#fff'}, sectionHeading: {fontSize: 14, fontWeight: '700', color: '#c9d5e1', marginTop: 4}, label: {fontSize: 11, color: '#8194a9'}, meta: {fontSize: 12, color: '#8194a9', lineHeight: 18}, metaCenter: {fontSize: 11, color: '#8194a9', lineHeight: 17, textAlign: 'center'}, statusPill: {fontSize: 9, fontWeight: '800', color: '#90e0ef', backgroundColor: '#102d40', paddingHorizontal: 8, paddingVertical: 5, borderRadius: 10}, secure: {fontSize: 9, fontWeight: '800', color: '#90e0ef'},
-  primary: {backgroundColor: '#00d4ff', borderRadius: 12, paddingHorizontal: 15, paddingVertical: 14, marginTop: 4, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'}, primaryText: {fontSize: 11, fontWeight: '900', letterSpacing: .4, color: '#03101b'}, arrow: {fontSize: 20, fontWeight: '500', color: '#03101b'}, actionGrid: {flexDirection: 'row', gap: 12}, action: {flex: 1, backgroundColor: '#0d1b2e', borderRadius: 16, padding: 16, borderWidth: 1, borderColor: '#12263d'}, actionIcon: {fontSize: 23, color: '#00d4ff'}, actionTitle: {fontSize: 13, fontWeight: '700', color: '#fff', marginTop: 10}, actionMeta: {fontSize: 10, color: '#71869b', marginTop: 3},
-  qrCard: {backgroundColor: '#0d1b2e', borderRadius: 20, padding: 18, alignItems: 'center', gap: 12}, qrTitle: {fontSize: 10, fontWeight: '900', letterSpacing: 2, color: '#90e0ef'}, qrWrap: {alignItems: 'center', padding: 16, backgroundColor: '#fff', borderRadius: 16}, pairingCode: {fontSize: 15, letterSpacing: 2, color: '#fff', fontWeight: '800'}, fingerprint: {fontSize: 11, lineHeight: 19, color: '#90e0ef', fontWeight: '600'},
-  transportBadge: {backgroundColor: '#172337', paddingHorizontal: 10, paddingVertical: 7, borderRadius: 14}, transportBadgeActive: {backgroundColor: '#10384a'}, transportBadgeText: {fontSize: 9, fontWeight: '900', color: '#8ba0b4'}, transportRow: {flexDirection: 'row', alignItems: 'center'}, transportIcon: {width: 46, height: 46, borderRadius: 14, backgroundColor: '#10283c', alignItems: 'center', justifyContent: 'center'}, peer: {flexDirection: 'row', alignItems: 'center', paddingVertical: 11, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#20344d'}, peerAvatar: {width: 40, height: 40, borderRadius: 13, backgroundColor: '#132c42', alignItems: 'center', justifyContent: 'center'}, peerAvatarText: {fontSize: 16, fontWeight: '900', color: '#90e0ef'}, peerName: {fontSize: 14, color: '#fff', fontWeight: '600'}, connectButton: {backgroundColor: '#00d4ff', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 9}, connectText: {fontSize: 9, fontWeight: '900', color: '#03101b'}, emptyState: {alignItems: 'center', paddingVertical: 25, gap: 8}, emptyIcon: {fontSize: 35, color: '#00d4ff'}, log: {fontSize: 10, color: '#90e0ef', lineHeight: 17},
-  input: {backgroundColor: '#12243a', color: '#fff', borderRadius: 11, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14}, settingRow: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 7}, settingValue: {fontSize: 11, color: '#90e0ef', fontWeight: '700', maxWidth: '55%'},
-  bottomNav: {height: 74, paddingBottom: 7, paddingTop: 8, paddingHorizontal: 10, flexDirection: 'row', backgroundColor: '#091625', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#172a40'}, navItem: {flex: 1, alignItems: 'center', justifyContent: 'center', gap: 2}, navIcon: {fontSize: 20, color: '#526a80'}, navIconActive: {color: '#00d4ff'}, navLabel: {fontSize: 9, color: '#526a80', fontWeight: '700'}, navLabelActive: {color: '#90e0ef'},
+  root: {flex: 1, backgroundColor: '#06101d'}, screen: {flex: 1}, content: {padding: 20, paddingBottom: 30, gap: 14},
+  splash: {flex: 1, backgroundColor: '#06101d', alignItems: 'center', justifyContent: 'center'}, splashMark: {width: 74, height: 74, borderRadius: 22, backgroundColor: '#00d4ff', alignItems: 'center', justifyContent: 'center', marginBottom: 18}, splashGlyph: {fontSize: 40, color: '#03101b', fontWeight: '900'}, splashTitle: {fontSize: 27, color: '#fff', fontWeight: '900', letterSpacing: 5}, splashMeta: {fontSize: 9, color: '#5c7488', letterSpacing: 2, marginTop: 8}, loadingTrack: {width: 110, height: 3, backgroundColor: '#13283b', marginTop: 25, borderRadius: 3}, loadingBar: {width: 70, height: 3, backgroundColor: '#00d4ff'},
+  header: {height: 68, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#07131f', borderBottomWidth: 1, borderBottomColor: '#10283a'}, brand: {fontSize: 16, color: '#fff', fontWeight: '900', letterSpacing: 2.5}, headerSub: {fontSize: 8, color: '#587387', letterSpacing: 1.5, marginTop: 2}, local: {flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1, borderColor: '#16374b', borderRadius: 20, paddingHorizontal: 9, paddingVertical: 6}, localDot: {width: 6, height: 6, borderRadius: 3, backgroundColor: '#00d4ff'}, localText: {fontSize: 8, color: '#80b5c4', letterSpacing: 1.2, fontWeight: '800'},
+  heroRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'}, eyebrow: {fontSize: 9, color: '#00d4ff', letterSpacing: 2.2, fontWeight: '900'}, hero: {fontSize: 31, color: '#fff', fontWeight: '900', letterSpacing: 1}, heroSub: {fontSize: 8, color: '#597387', letterSpacing: 1.5, marginTop: 2}, pageTitle: {fontSize: 30, color: '#fff', fontWeight: '900', marginTop: 2}, pageSub: {fontSize: 13, lineHeight: 19, color: '#738b9e'}, livePill: {flexDirection: 'row', alignItems: 'center', gap: 7, borderWidth: 1, borderColor: '#153b4d', borderRadius: 20, paddingHorizontal: 10, paddingVertical: 7}, liveText: {fontSize: 8, color: '#87bdca', letterSpacing: 1.5, fontWeight: '900'}, pulse: {width: 7, height: 7, borderRadius: 4, backgroundColor: '#00d4ff'},
+  nodeCard: {backgroundColor: '#091927', borderWidth: 1, borderColor: '#143149', borderRadius: 18, padding: 18, gap: 12}, nodeHeader: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'}, mono: {fontSize: 8, color: '#557489', letterSpacing: 2, fontWeight: '900'}, nodeName: {fontSize: 20, color: '#fff', fontWeight: '800', marginTop: 4}, nodeId: {fontSize: 11, color: '#76bfd0', letterSpacing: 1, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace'}, statusDot: {width: 10, height: 10, borderRadius: 5, backgroundColor: '#30485a'}, statusDotLive: {backgroundColor: '#00d4ff'}, divider: {height: StyleSheet.hairlineWidth, backgroundColor: '#173047'}, metrics: {flexDirection: 'row', justifyContent: 'space-between'}, metricValue: {fontSize: 22, color: '#fff', fontWeight: '900'}, metricLabel: {fontSize: 8, color: '#4e697d', letterSpacing: 1.5, marginTop: 2},
+  actionCard: {backgroundColor: '#092033', borderWidth: 1, borderColor: '#104d65', borderRadius: 18, padding: 18, gap: 9}, cardTitle: {fontSize: 19, color: '#fff', fontWeight: '850'}, cardText: {fontSize: 12, lineHeight: 18, color: '#7d96a8'}, rowBetween: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'}, stateText: {fontSize: 8, color: '#00d4ff', letterSpacing: 1.4, fontWeight: '900'}, primary: {minHeight: 48, backgroundColor: '#00d4ff', borderRadius: 11, paddingHorizontal: 15, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, marginTop: 4}, primaryText: {fontSize: 10, color: '#03101b', fontWeight: '900', letterSpacing: 1}, primaryArrow: {fontSize: 18, color: '#03101b', fontWeight: '900'},
+  activity: {backgroundColor: '#06131e', borderWidth: 1, borderColor: '#12384d', borderRadius: 15, padding: 15, gap: 7}, activityState: {fontSize: 8, color: '#00d4ff', letterSpacing: 1.2, fontWeight: '900'}, terminalLine: {fontSize: 10, color: '#68a9ba', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace'}, sectionHeading: {fontSize: 13, color: '#a5b8c5', fontWeight: '800', marginTop: 3}, quickRow: {flexDirection: 'row', gap: 12}, quick: {flex: 1, minHeight: 100, backgroundColor: '#091927', borderWidth: 1, borderColor: '#143149', borderRadius: 15, padding: 15, gap: 5}, quickGlyph: {fontSize: 22, color: '#00d4ff'}, quickTitle: {fontSize: 10, color: '#fff', fontWeight: '900', letterSpacing: 1.5}, quickMeta: {fontSize: 9, color: '#60798b'},
+  card: {backgroundColor: '#091927', borderWidth: 1, borderColor: '#143149', borderRadius: 16, padding: 16, gap: 9}, section: {fontSize: 16, color: '#fff', fontWeight: '800'}, label: {fontSize: 8, color: '#557489', letterSpacing: 1.7, fontWeight: '900'}, input: {backgroundColor: '#06131e', borderWidth: 1, borderColor: '#17384b', borderRadius: 10, color: '#fff', paddingHorizontal: 12, paddingVertical: 11}, fingerprint: {fontSize: 10, lineHeight: 17, color: '#76bfd0', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace'},
+  qrCard: {backgroundColor: '#f5f8fa', borderRadius: 20, padding: 20, alignItems: 'center', gap: 11}, qrLabel: {fontSize: 10, color: '#31485a', letterSpacing: 2, fontWeight: '900'}, qrWrap: {padding: 10, backgroundColor: '#fff', borderRadius: 8}, qrId: {fontSize: 15, color: '#07111f', letterSpacing: 2, fontWeight: '900'}, qrMeta: {fontSize: 8, color: '#637483', letterSpacing: 1.5, fontWeight: '800'}, terminal: {backgroundColor: '#040b12', borderWidth: 1, borderColor: '#153246', borderRadius: 14, padding: 15, gap: 7}, log: {fontSize: 9, color: '#5f9eae', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace'},
+  countBox: {width: 48, height: 48, borderRadius: 14, backgroundColor: '#0a1e2c', borderWidth: 1, borderColor: '#17485e', alignItems: 'center', justifyContent: 'center'}, empty: {alignItems: 'center', backgroundColor: '#091927', borderRadius: 17, borderWidth: 1, borderColor: '#143149', padding: 28, gap: 8}, emptyGlyph: {fontSize: 34, color: '#1a526b'}, peer: {flexDirection: 'row', alignItems: 'center', backgroundColor: '#091927', borderWidth: 1, borderColor: '#143149', borderRadius: 15, padding: 13, gap: 11}, peerMark: {width: 25, alignItems: 'center'}, peerInfo: {flex: 1}, peerName: {fontSize: 13, color: '#fff', fontWeight: '800'}, peerAddress: {fontSize: 8, color: '#536d80', marginTop: 3, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace'}, connect: {borderWidth: 1, borderColor: '#00d4ff', borderRadius: 8, paddingHorizontal: 11, paddingVertical: 9}, connectText: {fontSize: 8, color: '#00d4ff', fontWeight: '900', letterSpacing: 1},
+  nav: {height: 67, backgroundColor: '#07131f', borderTopWidth: 1, borderTopColor: '#10283a', flexDirection: 'row', paddingBottom: Platform.OS === 'ios' ? 9 : 2}, navItem: {flex: 1, alignItems: 'center', justifyContent: 'center', gap: 2}, navIcon: {fontSize: 20, color: '#3d586c'}, navActive: {color: '#00d4ff'}, navLabel: {fontSize: 7, color: '#3d586c', letterSpacing: 1, fontWeight: '900'},
 });
