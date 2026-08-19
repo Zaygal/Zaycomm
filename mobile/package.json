@@ -16,7 +16,6 @@
     "@sentry/react-native": "8.21.0",
     "react": "19.2.3",
     "react-native": "0.86.2",
-    "react-native-camera-kit": "^18.0.1",
     "react-native-get-random-values": "^1.11.0",
     "react-native-qrcode-svg": "^6.3.20",
     "react-native-svg": "^15.15.0"
