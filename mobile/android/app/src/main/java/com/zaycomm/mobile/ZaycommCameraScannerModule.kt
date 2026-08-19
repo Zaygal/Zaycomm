@@ -3,9 +3,13 @@ package com.zaycomm.mobile
 import android.Manifest
 import android.content.pm.PackageManager
 import android.util.Log
+import android.view.Gravity
+import android.widget.FrameLayout
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.barcode.BarcodeScanning
@@ -22,8 +26,8 @@ import java.util.concurrent.Executors
 /**
  * Stage 2 QR scanner foundation.
  *
- * CameraX owns frame delivery and ML Kit performs QR decoding. Valid Zaycomm
- * payloads are emitted to React Native as scanner events.
+ * CameraX owns preview/frame delivery and ML Kit performs QR decoding. Valid
+ * Zaycomm payloads are emitted to React Native as scanner events.
  */
 class ZaycommCameraScannerModule(
     private val context: ReactApplicationContext
@@ -31,22 +35,19 @@ class ZaycommCameraScannerModule(
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val scanner = BarcodeScanning.getClient()
     private var lastEmittedPayload: String? = null
+    private var previewContainer: FrameLayout? = null
 
     override fun getName(): String = "ZaycommCameraScanner"
 
     private fun emitQrDetected(raw: String) {
         if (raw == lastEmittedPayload) return
         lastEmittedPayload = raw
-
         val payload = Arguments.createMap().apply {
             putString("payload", raw)
             putInt("length", raw.length)
         }
-
-        context
-            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+        context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
             .emit("ZaycommQrDetected", payload)
-
         Log.d("ZaycommCamera", "QR_EVENT_EMITTED • length=${raw.length}")
     }
 
@@ -89,6 +90,14 @@ class ZaycommCameraScannerModule(
                 val lifecycleOwner = activity as? androidx.lifecycle.LifecycleOwner
                     ?: throw IllegalStateException("Activity is not a LifecycleOwner")
 
+                val preview = Preview.Builder().build()
+                val previewView = PreviewView(context).apply {
+                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                    contentDescription = "Zaycomm QR camera preview"
+                }
+                preview.setSurfaceProvider(previewView.surfaceProvider)
+
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
@@ -99,12 +108,7 @@ class ZaycommCameraScannerModule(
                         imageProxy.close()
                         return@setAnalyzer
                     }
-
-                    val image = InputImage.fromMediaImage(
-                        mediaImage,
-                        imageProxy.imageInfo.rotationDegrees
-                    )
-
+                    val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
                     scanner.process(image)
                         .addOnSuccessListener { barcodes ->
                             for (barcode in barcodes) {
@@ -112,29 +116,35 @@ class ZaycommCameraScannerModule(
                                     val raw = barcode.rawValue
                                     if (!raw.isNullOrEmpty()) {
                                         val valid = isZaycommQrPayload(raw)
-                                        Log.d(
-                                            "ZaycommCamera",
-                                            "QR_DETECTED • length=${raw.length} • zaycomm=$valid"
-                                        )
+                                        Log.d("ZaycommCamera", "QR_DETECTED • length=${raw.length} • zaycomm=$valid")
                                         if (valid) emitQrDetected(raw)
                                     }
                                 }
                             }
                         }
-                        .addOnFailureListener { error ->
-                            Log.e("ZaycommCamera", "QR_DECODE_ERROR", error)
-                        }
-                        .addOnCompleteListener {
-                            imageProxy.close()
-                        }
+                        .addOnFailureListener { error -> Log.e("ZaycommCamera", "QR_DECODE_ERROR", error) }
+                        .addOnCompleteListener { imageProxy.close() }
                 }
 
                 provider.unbindAll()
-                provider.bindToLifecycle(
-                    lifecycleOwner,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    analysis
-                )
+                provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+
+                ContextCompat.getMainExecutor(context).execute {
+                    val container = FrameLayout(context).apply {
+                        setBackgroundColor(android.graphics.Color.BLACK)
+                        addView(previewView, FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.MATCH_PARENT
+                        ))
+                    }
+                    previewContainer?.let { existing -> (existing.parent as? android.view.ViewGroup)?.removeView(existing) }
+                    val params = FrameLayout.LayoutParams(320, 320).apply {
+                        gravity = Gravity.CENTER_HORIZONTAL
+                        topMargin = 120
+                    }
+                    activity.addContentView(container, params)
+                    previewContainer = container
+                }
 
                 Log.d("ZaycommCamera", "ANALYSIS_READY")
                 promise.resolve(true)
@@ -159,11 +169,15 @@ class ZaycommCameraScannerModule(
     fun release(promise: Promise) {
         Log.d("ZaycommCamera", "SCANNER_RELEASE")
         lastEmittedPayload = null
-        scanner.close()
+        previewContainer?.let { container -> (container.parent as? android.view.ViewGroup)?.removeView(container) }
+        previewContainer = null
+        ProcessCameraProvider.getInstance(context).get().unbindAll()
         promise.resolve(null)
     }
 
     override fun invalidate() {
+        previewContainer?.let { container -> (container.parent as? android.view.ViewGroup)?.removeView(container) }
+        previewContainer = null
         executor.shutdownNow()
         scanner.close()
         super.invalidate()
