@@ -6,9 +6,8 @@ export type ZaycommQrEvent={payload:string;length:number;identity?:QrIdentityRes
 const scanner=NativeModules.ZaycommCameraScanner;
 
 /**
- * Pair/Nearby scanner hook. A valid Zaycomm QR is introduced to the existing
- * identity model before the event is delivered to the UI. No transport is
- * started here; routing/connection remains a separate layer.
+ * Subscribes to scanner results only. Camera lifecycle is deliberately owned
+ * by the explicit "Scan QR Code" action, not by the Pair tab.
  */
 export function subscribeToZaycommQr(
   onDetected:(event:ZaycommQrEvent)=>void,
@@ -21,11 +20,19 @@ export function subscribeToZaycommQr(
       // Invalid payload handling belongs to the dedicated scanner UX phase.
     }
   });
-  scanner?.prepareAnalysis?.().catch(()=>{});
   const originalRemove=subscription.remove.bind(subscription);
   subscription.remove=()=>{
     scanner?.release?.().catch(()=>{});
     originalRemove();
   };
   return subscription;
+}
+
+export async function startZaycommQrScanner():Promise<boolean>{
+  if(!scanner?.prepareAnalysis)return false;
+  return Boolean(await scanner.prepareAnalysis());
+}
+
+export async function stopZaycommQrScanner():Promise<void>{
+  await scanner?.release?.();
 }
