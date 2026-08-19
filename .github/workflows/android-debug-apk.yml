@@ -6,6 +6,7 @@ on:
   push:
     paths:
       - 'mobile/**'
+      - 'src/**'
       - '.github/workflows/android-debug-apk.yml'
 
 jobs:
