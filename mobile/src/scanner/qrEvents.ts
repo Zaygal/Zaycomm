@@ -1,16 +1,22 @@
-import {DeviceEventEmitter, EmitterSubscription} from 'react-native';
+import {DeviceEventEmitter,EmitterSubscription,NativeModules} from 'react-native';
 
 export type ZaycommQrEvent={payload:string;length:number};
 
+const scanner=NativeModules.ZaycommCameraScanner;
+
 /**
- * React Native-side scanner event hook.
- *
- * The native CameraX/ML Kit module emits `ZaycommQrDetected` through the
- * React Native device event emitter. Keeping this listener isolated lets the
- * Pair UI consume scanner events without changing AppV2 in this step.
+ * Pair-screen scanner hook. Subscribing starts the native camera analysis;
+ * removing the subscription releases it again.
  */
 export function subscribeToZaycommQr(
   onDetected:(event:ZaycommQrEvent)=>void,
 ):EmitterSubscription{
-  return DeviceEventEmitter.addListener('ZaycommQrDetected',onDetected);
+  const subscription=DeviceEventEmitter.addListener('ZaycommQrDetected',onDetected);
+  scanner?.prepareAnalysis?.().catch(()=>{});
+  const originalRemove=subscription.remove.bind(subscription);
+  subscription.remove=()=>{
+    scanner?.release?.().catch(()=>{});
+    originalRemove();
+  };
+  return subscription;
 }
