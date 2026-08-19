@@ -6,22 +6,23 @@ export type ZaycommQrEvent={payload:string;length:number;identity?:QrIdentityRes
 const scanner=NativeModules.ZaycommCameraScanner;
 let scanRequested=false;
 
-// The existing Nearby button requests CAMERA permission before switching to
-// the Pair route. Record that explicit action so merely opening Pair never
-// starts the camera. This is a one-shot gate consumed by the Pair subscriber.
+// Camera startup is tied to the explicit Nearby scan action. The camera is
+// prepared immediately after permission resolves, before React navigates to
+// the Pair surface, so the Pair identity QR cannot flash underneath it.
 const originalCameraRequest=PermissionsAndroid.request.bind(PermissionsAndroid);
 PermissionsAndroid.request=async(permission:any,...args:any[])=>{
-  if(permission===PermissionsAndroid.PERMISSIONS.CAMERA) scanRequested=true;
-  return originalCameraRequest(permission,...args);
+  const result=await originalCameraRequest(permission,...args);
+  if(permission===PermissionsAndroid.PERMISSIONS.CAMERA&&result===PermissionsAndroid.RESULTS.GRANTED){
+    scanRequested=true;
+    scanner?.prepareAnalysis?.().catch(()=>{});
+  }
+  return result;
 };
 
 export function subscribeToZaycommQr(
   onDetected:(event:ZaycommQrEvent)=>void,
 ):EmitterSubscription{
-  if(scanRequested){
-    scanRequested=false;
-    scanner?.prepareAnalysis?.().catch(()=>{});
-  }
+  scanRequested=false;
   const subscription=DeviceEventEmitter.addListener('ZaycommQrDetected',(event:{payload:string;length:number})=>{
     try {
       const identity=introduceZaycommQrIdentity(event.payload);
