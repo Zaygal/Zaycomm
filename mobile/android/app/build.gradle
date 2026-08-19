@@ -47,6 +47,14 @@ dependencies {
     // ReactActivity extends AppCompatActivity and therefore requires an
     // AppCompat theme at runtime.
     implementation('androidx.appcompat:appcompat:1.7.0')
+
+    // Stage 2 QR scanner foundation: CameraX provides the Android camera
+    // lifecycle/preview pipeline. Barcode decoding is intentionally not added
+    // in this commit so this dependency step can be validated independently.
+    implementation('androidx.camera:camera-core:1.4.2')
+    implementation('androidx.camera:camera-camera2:1.4.2')
+    implementation('androidx.camera:camera-lifecycle:1.4.2')
+    implementation('androidx.camera:camera-view:1.4.2')
 }
 
 // C25.4 debug APK: installable on a physical Android device for BLE validation.
