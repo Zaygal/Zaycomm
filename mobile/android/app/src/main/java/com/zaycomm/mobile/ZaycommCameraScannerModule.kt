@@ -20,8 +20,8 @@ import java.util.concurrent.Executors
 /**
  * Stage 2 QR scanner foundation.
  *
- * CameraX owns frame delivery and ML Kit performs QR decoding. React Native
- * payload delivery remains a separate step after native decoding is verified.
+ * CameraX owns frame delivery and ML Kit performs QR decoding. Only payloads
+ * matching the Zaycomm v1 envelope shape are accepted at this layer.
  */
 class ZaycommCameraScannerModule(
     private val context: ReactApplicationContext
@@ -92,7 +92,11 @@ class ZaycommCameraScannerModule(
                                 if (barcode.format == Barcode.FORMAT_QR_CODE) {
                                     val raw = barcode.rawValue
                                     if (!raw.isNullOrEmpty()) {
-                                        Log.d("ZaycommCamera", "QR_DETECTED • length=${raw.length}")
+                                        val valid = isZaycommQrPayload(raw)
+                                        Log.d(
+                                            "ZaycommCamera",
+                                            "QR_DETECTED • length=${raw.length} • zaycomm=$valid"
+                                        )
                                     }
                                 }
                             }
@@ -119,6 +123,16 @@ class ZaycommCameraScannerModule(
                 promise.reject("ANALYSIS_PREPARE_ERROR", t.message, t)
             }
         }, ContextCompat.getMainExecutor(context))
+    }
+
+    private fun isZaycommQrPayload(raw: String): Boolean {
+        if (raw.length !in 32..4096) return false
+        if (!raw.startsWith("{")) return false
+        if (!raw.endsWith("}")) return false
+        return raw.contains("\"scheme\":\"zaycomm\"") &&
+            raw.contains("\"version\":1") &&
+            raw.contains("\"nodeId\"") &&
+            raw.contains("\"publicKey\"")
     }
 
     @ReactMethod
