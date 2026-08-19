@@ -15,28 +15,34 @@ export class KnownPeerStore {
   private readonly peers = new Map<string, KnownPeer>();
 
   introduce(nodeId: string, publicKey: Uint8Array): KnownPeer {
-    if (!nodeId || publicKey.length !== 32) throw new Error('INVALID_PEER_IDENTITY');
-    const existing = this.peers.get(nodeId);
+    if (!/^[0-9a-f]{16}$/i.test(nodeId) || publicKey.length !== 32) {
+      throw new Error('INVALID_PEER_IDENTITY');
+    }
+    const derivedNodeId = nodeIdFromPublicKey(publicKey);
+    if (nodeId.toLowerCase() !== derivedNodeId) {
+      throw new Error('PEER_NODE_ID_MISMATCH');
+    }
+    const existing = this.peers.get(nodeId.toLowerCase());
     if (existing) {
       if (!bytesEqual(existing.publicKey, publicKey)) throw new Error('PEER_IDENTITY_MISMATCH');
       return existing;
     }
     const peer: KnownPeer = {
-      nodeId,
+      nodeId: nodeId.toLowerCase(),
       publicKey: Uint8Array.from(publicKey),
       introducedAt: Date.now(),
       source: 'qr',
     };
-    this.peers.set(nodeId, peer);
+    this.peers.set(peer.nodeId, peer);
     return peer;
   }
 
   get(nodeId: string): KnownPeer | undefined {
-    return this.peers.get(nodeId);
+    return this.peers.get(nodeId.toLowerCase());
   }
 
   has(nodeId: string): boolean {
-    return this.peers.has(nodeId);
+    return this.peers.has(nodeId.toLowerCase());
   }
 
   list(): KnownPeer[] {
@@ -52,14 +58,18 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 export function nodeIdFromPublicKey(publicKey: Uint8Array): string {
   const hex = Array.from(publicKey).map((b) => b.toString(16).padStart(2, '0')).join('');
-  return hex.slice(0, 16);
+  return hex.slice(0, 16).toLowerCase();
 }
 
 export function identityToKnownPeer(identity: Identity, nodeId?: string): KnownPeer {
+  const resolvedNodeId = nodeId ?? nodeIdFromPublicKey(identity.publicKey);
   return {
-    nodeId: nodeId ?? nodeIdFromPublicKey(identity.publicKey),
+    nodeId: resolvedNodeId,
     publicKey: Uint8Array.from(identity.publicKey),
     introducedAt: Date.now(),
     source: 'qr',
   };
 }
+
+/** Process-wide store used by the mobile QR introduction bridge. */
+export const knownPeerStore = new KnownPeerStore();
