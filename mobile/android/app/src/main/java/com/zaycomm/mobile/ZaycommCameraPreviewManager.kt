@@ -3,6 +3,7 @@ package com.zaycomm.mobile
 import android.Manifest
 import android.content.pm.PackageManager
 import android.util.Log
+import android.widget.FrameLayout
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -15,30 +16,39 @@ import com.facebook.react.uimanager.ThemedReactContext
 /**
  * Stage 2 camera binding.
  *
- * This step connects the native PreviewView to CameraX's back-camera preview
+ * This step connects a native PreviewView to CameraX's back-camera preview
  * use case. Permission requesting and QR decoding remain separate steps.
  */
-class ZaycommCameraPreviewManager : SimpleViewManager<ZaycommCameraPreviewManager.ZaycommPreviewView>() {
+class ZaycommCameraPreviewManager : SimpleViewManager<FrameLayout>() {
     override fun getName(): String = "ZaycommCameraPreview"
 
-    override fun createViewInstance(reactContext: ThemedReactContext): ZaycommPreviewView {
-        val view = ZaycommPreviewView(reactContext).apply {
+    override fun createViewInstance(reactContext: ThemedReactContext): FrameLayout {
+        val container = FrameLayout(reactContext)
+        val preview = PreviewView(reactContext).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             scaleType = PreviewView.ScaleType.FILL_CENTER
             contentDescription = "Zaycomm camera preview"
         }
 
-        bindCamera(reactContext, view)
-        return view
+        container.addView(
+            preview,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        bindCamera(reactContext, preview)
+        return container
     }
 
-    override fun onDropViewInstance(view: ZaycommPreviewView) {
-        view.cameraProvider?.unbindAll()
-        view.cameraProvider = null
+    override fun onDropViewInstance(view: FrameLayout) {
+        view.getChildAt(0)?.tag?.let { tag ->
+            if (tag is ProcessCameraProvider) tag.unbindAll()
+        }
         super.onDropViewInstance(view)
     }
 
-    private fun bindCamera(reactContext: ThemedReactContext, view: ZaycommPreviewView) {
+    private fun bindCamera(reactContext: ThemedReactContext, previewView: PreviewView) {
         Log.d("ZaycommCamera", "PREVIEW_BIND_START")
 
         if (ContextCompat.checkSelfPermission(reactContext, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -56,24 +66,20 @@ class ZaycommCameraPreviewManager : SimpleViewManager<ZaycommCameraPreviewManage
         future.addListener({
             try {
                 val provider = future.get()
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(view.surfaceProvider)
+                val cameraPreview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
                 }
                 provider.unbindAll()
                 provider.bindToLifecycle(
                     lifecycleOwner,
                     CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview
+                    cameraPreview
                 )
-                view.cameraProvider = provider
+                previewView.tag = provider
                 Log.d("ZaycommCamera", "PREVIEW_BIND_READY")
             } catch (t: Throwable) {
                 Log.e("ZaycommCamera", "PREVIEW_BIND_ERROR", t)
             }
         }, ContextCompat.getMainExecutor(reactContext))
-    }
-
-    class ZaycommPreviewView(context: android.content.Context) : PreviewView(context) {
-        var cameraProvider: ProcessCameraProvider? = null
     }
 }
