@@ -6,5 +6,7 @@
 	<string>Zaycomm uses Bluetooth to exchange encrypted messages with nearby devices without Internet access.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Zaycomm uses Bluetooth to make this device available as an offline relay.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Zaycomm uses the camera to scan device pairing QR codes.</string>
 </dict>
 </plist>
