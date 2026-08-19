@@ -10,26 +10,45 @@ import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
  * Stage 2 QR scanner foundation.
  *
- * CameraX owns frame delivery and ML Kit performs QR decoding. Only payloads
- * matching the Zaycomm v1 envelope shape are accepted at this layer.
+ * CameraX owns frame delivery and ML Kit performs QR decoding. Valid Zaycomm
+ * payloads are emitted to React Native as scanner events.
  */
 class ZaycommCameraScannerModule(
     private val context: ReactApplicationContext
 ) : ReactContextBaseJavaModule(context) {
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val scanner = BarcodeScanning.getClient()
+    private var lastEmittedPayload: String? = null
 
     override fun getName(): String = "ZaycommCameraScanner"
+
+    private fun emitQrDetected(raw: String) {
+        if (raw == lastEmittedPayload) return
+        lastEmittedPayload = raw
+
+        val payload = Arguments.createMap().apply {
+            putString("payload", raw)
+            putInt("length", raw.length)
+        }
+
+        context
+            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+            .emit("ZaycommQrDetected", payload)
+
+        Log.d("ZaycommCamera", "QR_EVENT_EMITTED • length=${raw.length}")
+    }
 
     @ReactMethod
     fun prepare(promise: Promise) {
@@ -97,6 +116,7 @@ class ZaycommCameraScannerModule(
                                             "ZaycommCamera",
                                             "QR_DETECTED • length=${raw.length} • zaycomm=$valid"
                                         )
+                                        if (valid) emitQrDetected(raw)
                                     }
                                 }
                             }
@@ -138,6 +158,7 @@ class ZaycommCameraScannerModule(
     @ReactMethod
     fun release(promise: Promise) {
         Log.d("ZaycommCamera", "SCANNER_RELEASE")
+        lastEmittedPayload = null
         scanner.close()
         promise.resolve(null)
     }
