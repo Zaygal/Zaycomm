@@ -10,7 +10,8 @@ class ZaycommBlePackage : ReactPackage {
         listOf(
             ZaycommBleModule(reactContext),
             ZaycommNotificationModule(reactContext),
-            ZaycommCameraDiagnosticsModule(reactContext)
+            ZaycommCameraDiagnosticsModule(reactContext),
+            ZaycommCameraScannerModule(reactContext)
         )
 
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> = emptyList()
