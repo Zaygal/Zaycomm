@@ -27,7 +27,20 @@ jobs:
           cache-dependency-path: mobile/package.json
 
       - name: Install mobile dependencies
-        run: npm install
+        run: |
+          set -e
+          for attempt in 1 2 3; do
+            echo "npm install attempt ${attempt}/3"
+            if npm install --no-audit --no-fund --prefer-online; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "npm install attempt ${attempt} failed; waiting before retry..."
+              npm cache verify || true
+              sleep $((attempt * 15))
+            fi
+          done
+          exit 1
 
       - name: Set up Java
         uses: actions/setup-java@v5
