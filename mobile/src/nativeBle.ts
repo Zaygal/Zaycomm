@@ -5,7 +5,7 @@ type NativeModulesShape = { ZaycommBle?: AndroidBleNativeModule };
 export interface AndroidBleNativeModule {
   startScan(): void;
   stopScan(): void;
-  startAdvertising(nodeId: string): Promise<void>;
+  startAdvertising(nodeName: string): Promise<void>;
   stopAdvertising(): void;
   connect(address: string): Promise<void>;
   disconnect(address: string): Promise<void>;
