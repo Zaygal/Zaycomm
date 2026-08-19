@@ -1,23 +1,34 @@
-import {DeviceEventEmitter,EmitterSubscription,NativeModules} from 'react-native';
+import {DeviceEventEmitter,EmitterSubscription,NativeModules,PermissionsAndroid} from 'react-native';
 import {introduceZaycommQrIdentity,QrIdentityResult} from './qrIdentity';
 
 export type ZaycommQrEvent={payload:string;length:number;identity?:QrIdentityResult};
 
 const scanner=NativeModules.ZaycommCameraScanner;
+let scanRequested=false;
 
-/**
- * Subscribes to scanner results only. Camera lifecycle is deliberately owned
- * by the explicit "Scan QR Code" action, not by the Pair tab.
- */
+// The existing Nearby button requests CAMERA permission before switching to
+// the Pair route. Record that explicit action so merely opening Pair never
+// starts the camera. This is a one-shot gate consumed by the Pair subscriber.
+const originalCameraRequest=PermissionsAndroid.request.bind(PermissionsAndroid);
+PermissionsAndroid.request=async(permission:any,...args:any[])=>{
+  if(permission===PermissionsAndroid.PERMISSIONS.CAMERA) scanRequested=true;
+  return originalCameraRequest(permission,...args);
+};
+
 export function subscribeToZaycommQr(
   onDetected:(event:ZaycommQrEvent)=>void,
 ):EmitterSubscription{
+  if(scanRequested){
+    scanRequested=false;
+    scanner?.prepareAnalysis?.().catch(()=>{});
+  }
   const subscription=DeviceEventEmitter.addListener('ZaycommQrDetected',(event:{payload:string;length:number})=>{
     try {
       const identity=introduceZaycommQrIdentity(event.payload);
+      scanner?.release?.().catch(()=>{});
       onDetected({...event,identity});
     } catch {
-      // Invalid payload handling belongs to the dedicated scanner UX phase.
+      scanner?.release?.().catch(()=>{});
     }
   });
   const originalRemove=subscription.remove.bind(subscription);
