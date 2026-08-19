@@ -14,5 +14,8 @@ class ZaycommBlePackage : ReactPackage {
             ZaycommCameraScannerModule(reactContext)
         )
 
-    override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> = emptyList()
+    override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =
+        listOf(
+            ZaycommCameraPreviewManager()
+        )
 }
