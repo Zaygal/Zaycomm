@@ -1,0 +1,30 @@
+name: repair QR bundle temp
+on:
+  push:
+    branches: [fix/qr-detection-bundle]
+permissions:
+  contents: write
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with: {fetch-depth: 0}
+      - shell: bash
+        run: |
+          set -euo pipefail
+          git cherry-pick a640cc5e8a568616fd01758112c575c76fde9bb1
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('mobile/AppV2.tsx')
+          s=p.read_text()
+          old='outputRange:[.7,1]})}]/><Text'
+          new='outputRange:[.7,1]})}]}/><Text'
+          assert old in s
+          p.write_text(s.replace(old,new,1))
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add mobile/AppV2.tsx
+          git commit -m 'fix(test): repair QR detection bundle syntax'
+          git push origin HEAD:fix/qr-detection-bundle
