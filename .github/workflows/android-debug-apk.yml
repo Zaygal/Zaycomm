@@ -1,3 +1,4 @@
+# Baseline APK test trigger — no build logic changed.
 name: Android debug APK
 
 on:
