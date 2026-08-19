@@ -2,6 +2,8 @@ name: repair QR bundle temp
 on:
   push:
     branches: [fix/qr-detection-bundle]
+  pull_request:
+    branches: [test]
 permissions:
   contents: write
 jobs:
@@ -13,6 +15,10 @@ jobs:
       - shell: bash
         run: |
           set -euo pipefail
+          if grep -q "cameraDiagnostics=NativeModules.ZaycommCameraDiagnostics" mobile/AppV2.tsx; then
+            echo "QR changes already applied"
+            exit 0
+          fi
           git cherry-pick a640cc5e8a568616fd01758112c575c76fde9bb1
           python3 - <<'PY'
           from pathlib import Path
