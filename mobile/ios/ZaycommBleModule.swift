@@ -51,10 +51,9 @@ final class ZaycommBleModule: RCTEventEmitter, CBCentralManagerDelegate, CBPerip
         central.stopScan()
     }
 
-    /// Advertises only the public Zaycomm BLE service. No node identity,
-    /// public key, routing information or encrypted payload is placed in the
-    /// advertisement. Peer identity is established by the Zaycomm protocol.
-    @objc func startAdvertising(_ nodeId: String, resolver resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
+    /// Advertises the public Zaycomm BLE service and the configured human-readable node name.
+    /// No node identity, public key, routing information or encrypted payload is placed in the advertisement.
+    @objc func startAdvertising(_ nodeName: String, resolver resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
         guard peripheralManager.state == .poweredOn else {
             reject("BLE_UNAVAILABLE", "Bluetooth LE is unavailable or disabled", nil)
             return
@@ -75,12 +74,10 @@ final class ZaycommBleModule: RCTEventEmitter, CBCentralManagerDelegate, CBPerip
         service.characteristics = [characteristic]
         peripheralManager.add(service)
 
-        // nodeId is intentionally not advertised. It is accepted by the
-        // bridge for API compatibility and future privacy-preserving beacons.
-        _ = nodeId
+        let name = nodeName.trimmingCharacters(in: .whitespacesAndNewlines)
         peripheralManager.startAdvertising([
             CBAdvertisementDataServiceUUIDsKey: [Self.serviceUUID],
-            CBAdvertisementDataLocalNameKey: "Zaycomm"
+            CBAdvertisementDataLocalNameKey: name.isEmpty ? "Zaycomm Node" : name
         ])
         advertising = true
         resolve(nil)
@@ -164,6 +161,7 @@ final class ZaycommBleModule: RCTEventEmitter, CBCentralManagerDelegate, CBPerip
         emit("ZaycommBleAdvertisement", [
             "id": peripheral.identifier.uuidString,
             "address": peripheral.identifier.uuidString,
+            "name": advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? peripheral.name ?? "Zaycomm Node",
             "publicKey": NSNull()
         ])
     }
@@ -221,40 +219,16 @@ final class ZaycommBleModule: RCTEventEmitter, CBCentralManagerDelegate, CBPerip
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard error == nil, characteristic.uuid == Self.frameUUID, let value = characteristic.value else { return }
+        guard error == nil, characteristic.uuid == Self.frameUUID, let data = characteristic.value else { return }
         emit("ZaycommBleFrame", [
-            "peerId": peripheral.identifier.uuidString,
-            "frame": [UInt8](value).map { NSNumber(value: $0) }
+            "address": peripheral.identifier.uuidString,
+            "frame": [UInt8](data)
         ])
     }
 
     // MARK: CBPeripheralManagerDelegate
 
     func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
-        if peripheral.state != .poweredOn && advertising {
-            advertising = false
-        }
-    }
-
-    func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
-        for request in requests {
-            guard request.characteristic.uuid == Self.frameUUID, let value = request.value, value.count <= 200 else {
-                peripheralManager.respond(to: request, withResult: .unlikelyError)
-                continue
-            }
-            emit("ZaycommBleFrame", [
-                "peerId": request.central.identifier.uuidString,
-                "frame": [UInt8](value).map { NSNumber(value: $0) }
-            ])
-            peripheralManager.respond(to: request, withResult: .success)
-        }
-    }
-
-    func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
-        emit("ZaycommBleConnectionChanged", ["peerId": central.identifier.uuidString, "connected": true])
-    }
-
-    func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
-        emit("ZaycommBleConnectionChanged", ["peerId": central.identifier.uuidString, "connected": false])
+        // React Native controls when advertising begins. Nothing is started here automatically.
     }
 }
