@@ -23,12 +23,6 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-/**
- * Stage 2 QR scanner foundation.
- *
- * CameraX owns preview/frame delivery and ML Kit performs QR decoding. Valid
- * Zaycomm payloads are emitted to React Native as scanner events.
- */
 class ZaycommCameraScannerModule(
     private val context: ReactApplicationContext
 ) : ReactContextBaseJavaModule(context) {
@@ -138,15 +132,15 @@ class ZaycommCameraScannerModule(
                         ))
                     }
                     previewContainer?.let { existing -> (existing.parent as? android.view.ViewGroup)?.removeView(existing) }
-                    val params = FrameLayout.LayoutParams(320, 320).apply {
-                        gravity = Gravity.CENTER_HORIZONTAL
-                        topMargin = 120
-                    }
+                    val params = FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    ).apply { gravity = Gravity.TOP or Gravity.START }
                     activity.addContentView(container, params)
                     previewContainer = container
                 }
 
-                Log.d("ZaycommCamera", "ANALYSIS_READY")
+                Log.d("ZaycommCamera", "ANALYSIS_READY • FULLSCREEN")
                 promise.resolve(true)
             } catch (t: Throwable) {
                 Log.e("ZaycommCamera", "ANALYSIS_PREPARE_ERROR", t)
