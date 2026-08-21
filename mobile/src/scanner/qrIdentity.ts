@@ -1,5 +1,5 @@
 import { computeFingerprint } from '../../../src/identity/identity';
-import { knownPeerStore, type KnownPeer } from '../../../src/identity/knownPeers';
+import { introducePeerIdentity, type PeerIdentity } from '../core/peerEstablishment';
 
 export interface ZaycommQrIdentity {
   scheme: 'zaycomm';
@@ -11,16 +11,16 @@ export interface ZaycommQrIdentity {
 }
 
 export interface QrIdentityResult {
-  peer: KnownPeer;
+  peer: Awaited<ReturnType<typeof introducePeerIdentity>>;
   identity: ZaycommQrIdentity;
 }
 
 /**
  * Canonical QR identity introduction.
  * QR only introduces a peer identity; it does not authenticate a transport,
- * start BLE, or mark the peer as trusted by itself.
+ * start BLE, or mark the peer as established by itself.
  */
-export function introduceZaycommQrIdentity(payload: string): QrIdentityResult {
+export async function introduceZaycommQrIdentity(payload: string): Promise<QrIdentityResult> {
   if (typeof payload !== 'string' || payload.length === 0 || payload.length > 4096) {
     throw new Error('INVALID_QR_PAYLOAD');
   }
@@ -43,8 +43,8 @@ export function introduceZaycommQrIdentity(payload: string): QrIdentityResult {
   }
 
   const nodeId = parsed.nodeId.toLowerCase();
-  const publicKey = hexToBytes(parsed.publicKey.toLowerCase());
-  const fingerprint = computeFingerprint(publicKey).replace(/\s/g, '').slice(0, 16).toLowerCase();
+  const publicKey = parsed.publicKey.toLowerCase();
+  const fingerprint = computeFingerprint(hexToBytes(publicKey)).replace(/\s/g, '').slice(0, 16).toLowerCase();
   if (fingerprint !== nodeId) throw new Error('PEER_NODE_ID_MISMATCH');
 
   let capabilities: string[] | undefined;
@@ -67,12 +67,18 @@ export function introduceZaycommQrIdentity(payload: string): QrIdentityResult {
     scheme: 'zaycomm',
     version: 1,
     nodeId,
-    publicKey: parsed.publicKey.toLowerCase(),
+    publicKey,
     ...(capabilities ? { capabilities } : {}),
     ...(nonce ? { nonce } : {}),
   };
 
-  const peer = knownPeerStore.introduce(nodeId, publicKey);
+  const peerIdentity: PeerIdentity = {
+    nodeId,
+    publicKey,
+    capabilities,
+  };
+
+  const peer = await introducePeerIdentity(peerIdentity);
   return { peer, identity };
 }
 
