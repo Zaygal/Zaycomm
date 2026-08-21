@@ -1,10 +1,13 @@
-import {knownPeerStore, type KnownPeer} from '../../../src/identity/knownPeers';
+import { computeFingerprint } from '../../../src/identity/identity';
+import { knownPeerStore, type KnownPeer } from '../../../src/identity/knownPeers';
 
 export interface ZaycommQrIdentity {
   scheme: 'zaycomm';
   version: 1;
   nodeId: string;
   publicKey: string;
+  capabilities?: string[];
+  nonce?: string;
 }
 
 export interface QrIdentityResult {
@@ -13,10 +16,15 @@ export interface QrIdentityResult {
 }
 
 /**
- * Parses and introduces a Zaycomm QR identity into the existing identity
- * model. This deliberately does not initiate BLE or any other transport.
+ * Canonical QR identity introduction.
+ * QR only introduces a peer identity; it does not authenticate a transport,
+ * start BLE, or mark the peer as trusted by itself.
  */
 export function introduceZaycommQrIdentity(payload: string): QrIdentityResult {
+  if (typeof payload !== 'string' || payload.length === 0 || payload.length > 4096) {
+    throw new Error('INVALID_QR_PAYLOAD');
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(payload);
@@ -34,15 +42,38 @@ export function introduceZaycommQrIdentity(payload: string): QrIdentityResult {
     throw new Error('INVALID_PUBLIC_KEY');
   }
 
+  const nodeId = parsed.nodeId.toLowerCase();
+  const publicKey = hexToBytes(parsed.publicKey.toLowerCase());
+  const fingerprint = computeFingerprint(publicKey).replace(/\s/g, '').slice(0, 16).toLowerCase();
+  if (fingerprint !== nodeId) throw new Error('PEER_NODE_ID_MISMATCH');
+
+  let capabilities: string[] | undefined;
+  if (parsed.capabilities !== undefined) {
+    if (!Array.isArray(parsed.capabilities) || parsed.capabilities.some((value) => typeof value !== 'string')) {
+      throw new Error('INVALID_CAPABILITIES');
+    }
+    capabilities = [...new Set(parsed.capabilities as string[])].slice(0, 32);
+  }
+
+  let nonce: string | undefined;
+  if (parsed.nonce !== undefined) {
+    if (typeof parsed.nonce !== 'string' || !/^[0-9a-f]{32}$/i.test(parsed.nonce)) {
+      throw new Error('INVALID_NONCE');
+    }
+    nonce = parsed.nonce.toLowerCase();
+  }
+
   const identity: ZaycommQrIdentity = {
     scheme: 'zaycomm',
     version: 1,
-    nodeId: parsed.nodeId.toLowerCase(),
+    nodeId,
     publicKey: parsed.publicKey.toLowerCase(),
+    ...(capabilities ? { capabilities } : {}),
+    ...(nonce ? { nonce } : {}),
   };
-  const publicKey = hexToBytes(identity.publicKey);
-  const peer = knownPeerStore.introduce(identity.nodeId, publicKey);
-  return {peer, identity};
+
+  const peer = knownPeerStore.introduce(nodeId, publicKey);
+  return { peer, identity };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -50,9 +81,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function hexToBytes(value: string): Uint8Array {
-  const bytes = new Uint8Array(value.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
-  }
+  if (!/^[0-9a-f]{64}$/i.test(value)) throw new Error('INVALID_PUBLIC_KEY');
+  const bytes = new Uint8Array(32);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
   return bytes;
 }
