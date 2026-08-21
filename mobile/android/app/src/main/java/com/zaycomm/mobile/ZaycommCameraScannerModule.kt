@@ -24,7 +24,6 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import com.facebook.react.bridge.ActivityEventListener
-import com.facebook.react.bridge.BaseActivityEventListener
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -48,11 +47,15 @@ class ZaycommCameraScannerModule(private val context: ReactApplicationContext) :
     private var candidateFrames = 0
     private var previewContainer: FrameLayout? = null
 
-    private val activityListener: ActivityEventListener = object : BaseActivityEventListener() {
-        override fun onActivityResult(activity: Activity?, requestCode: Int, resultCode: Int, intent: Intent?) {
+    private val activityListener: ActivityEventListener = object : ActivityEventListener {
+        override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, intent: Intent?) {
             if (requestCode != GALLERY_REQUEST || resultCode != Activity.RESULT_OK) return
             val uri = intent?.data ?: return
             decodeGalleryUri(uri)
+        }
+
+        override fun onNewIntent(intent: Intent) {
+            // No deep-link handling is required by the QR gallery flow.
         }
     }
 
