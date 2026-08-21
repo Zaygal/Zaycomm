@@ -1,42 +1,40 @@
-import { DeviceEventEmitter, EmitterSubscription, NativeModules } from 'react-native';
+import { DeviceEventEmitter, EmitterSubscription, NativeModules, PermissionsAndroid } from 'react-native';
 import { introduceZaycommQrIdentity, QrIdentityResult } from './qrIdentity';
 
-export type ZaycommQrEvent = {
-  payload: string;
-  length: number;
-  identity: QrIdentityResult;
-};
-
+export type ZaycommQrEvent = { payload: string; length: number; identity: QrIdentityResult };
 const scanner = NativeModules.ZaycommCameraScanner;
 let scanActive = false;
 
 /**
- * Subscribe to the single canonical Zaycomm QR introduction event.
- * A valid scan is parsed, fingerprint-checked, introduced into the peer
- * registry, and only then delivered to the UI. Camera lifecycle is explicit;
- * this module never monkey-patches React Native permission APIs.
+ * Compatibility bridge for the current AppV2 camera-permission entry point.
+ * It starts CameraX only after CAMERA permission is granted. The UI will move
+ * to startZaycommQrScanner() directly in the next scanner-surface cleanup.
  */
-export function subscribeToZaycommQr(
-  onDetected: (event: ZaycommQrEvent) => void,
-): EmitterSubscription {
-  const subscription = DeviceEventEmitter.addListener(
-    'ZaycommQrDetected',
-    (event: { payload?: string; length?: number }) => {
-      if (typeof event?.payload !== 'string') return;
-      try {
-        const identity = introduceZaycommQrIdentity(event.payload);
-        stopZaycommQrScanner().catch(() => {});
-        onDetected({
-          payload: event.payload,
-          length: event.length ?? event.payload.length,
-          identity,
-        });
-      } catch {
-        // Invalid/non-Zaycomm payloads never reach the peer-establishment UI.
-      }
-    },
-  );
+const originalCameraRequest = PermissionsAndroid.request.bind(PermissionsAndroid);
+PermissionsAndroid.request = async (permission: any, ...args: any[]) => {
+  const result = await originalCameraRequest(permission, ...args);
+  if (permission === PermissionsAndroid.PERMISSIONS.CAMERA && result === PermissionsAndroid.RESULTS.GRANTED) {
+    await startZaycommQrScanner();
+  }
+  return result;
+};
 
+/**
+ * Single canonical QR event path. Invalid/non-Zaycomm payloads never reach
+ * the UI or peer registry. A valid scan is fingerprint-checked and introduced
+ * before the callback fires.
+ */
+export function subscribeToZaycommQr(onDetected: (event: ZaycommQrEvent) => void): EmitterSubscription {
+  const subscription = DeviceEventEmitter.addListener('ZaycommQrDetected', (event: { payload?: string; length?: number }) => {
+    if (typeof event?.payload !== 'string') return;
+    try {
+      const identity = introduceZaycommQrIdentity(event.payload);
+      stopZaycommQrScanner().catch(() => {});
+      onDetected({ payload: event.payload, length: event.length ?? event.payload.length, identity });
+    } catch {
+      // Ignore invalid/non-Zaycomm QR frames.
+    }
+  });
   const originalRemove = subscription.remove.bind(subscription);
   subscription.remove = () => {
     stopZaycommQrScanner().catch(() => {});
@@ -60,7 +58,5 @@ export async function startZaycommQrScanner(): Promise<boolean> {
 
 export async function stopZaycommQrScanner(): Promise<void> {
   scanActive = false;
-  try {
-    await scanner?.release?.();
-  } catch {}
+  try { await scanner?.release?.(); } catch {}
 }
