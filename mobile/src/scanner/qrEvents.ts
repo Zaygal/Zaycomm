@@ -1,5 +1,6 @@
 import { DeviceEventEmitter, EmitterSubscription, NativeModules, PermissionsAndroid } from 'react-native';
 import { introduceZaycommQrIdentity, QrIdentityResult } from './qrIdentity';
+import { introducePeerIdentity } from '../core/peerEstablishment';
 
 export type ZaycommQrEvent = { payload: string; length: number; identity: QrIdentityResult };
 const scanner = NativeModules.ZaycommCameraScanner;
@@ -20,19 +21,28 @@ PermissionsAndroid.request = async (permission: any, ...args: any[]) => {
 };
 
 /**
- * Single canonical QR event path. Invalid/non-Zaycomm payloads never reach
- * the UI or peer registry. A valid scan is fingerprint-checked and introduced
- * before the callback fires.
+ * Single canonical QR establishment path.
+ *
+ * 1. Validate the QR and its cryptographic node-id fingerprint.
+ * 2. Persist the node as an INTRODUCED peer.
+ * 3. Only then notify the UI.
+ *
+ * QR never starts BLE, authenticates a transport, or marks a peer established.
  */
 export function subscribeToZaycommQr(onDetected: (event: ZaycommQrEvent) => void): EmitterSubscription {
-  const subscription = DeviceEventEmitter.addListener('ZaycommQrDetected', (event: { payload?: string; length?: number }) => {
+  const subscription = DeviceEventEmitter.addListener('ZaycommQrDetected', async (event: { payload?: string; length?: number }) => {
     if (typeof event?.payload !== 'string') return;
     try {
       const identity = introduceZaycommQrIdentity(event.payload);
-      stopZaycommQrScanner().catch(() => {});
+      await introducePeerIdentity({
+        nodeId: identity.identity.nodeId,
+        publicKey: identity.identity.publicKey,
+        capabilities: identity.identity.capabilities ?? [],
+      });
+      await stopZaycommQrScanner();
       onDetected({ payload: event.payload, length: event.length ?? event.payload.length, identity });
     } catch {
-      // Ignore invalid/non-Zaycomm QR frames.
+      // Ignore invalid/non-Zaycomm QR frames and persistence failures.
     }
   });
   const originalRemove = subscription.remove.bind(subscription);
