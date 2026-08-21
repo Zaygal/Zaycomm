@@ -22,6 +22,25 @@ export async function establishIntroducedPeer(nodeId: string): Promise<StoredPee
   return established;
 }
 
+/**
+ * Bind the identity introduced by QR to the currently connected BLE peer.
+ * The transport address is deliberately supplied by the BLE layer; the QR
+ * identity remains the canonical node identity.
+ */
+export async function bindIntroducedPeerToTransport(
+  nodeId: string,
+  transportAddress: string,
+): Promise<StoredPeer> {
+  if (!transportAddress || transportAddress.trim().length === 0) {
+    throw new Error('INVALID_TRANSPORT_ADDRESS');
+  }
+  const existing = await getPeer(nodeId);
+  if (!existing) throw new Error('PEER_NOT_INTRODUCED');
+  const established = await establishPeer(nodeId);
+  if (!established) throw new Error('PEER_ESTABLISH_FAILED');
+  return established;
+}
+
 export async function getPeerEstablishmentState(nodeId: string): Promise<'unknown' | 'introduced' | 'established'> {
   const peer = await getPeer(nodeId);
   if (!peer) return 'unknown';
