@@ -7,28 +7,18 @@ const scanner = NativeModules.ZaycommCameraScanner;
 let scanActive = false;
 
 /**
- * Compatibility bridge for the current AppV2 camera-permission entry point.
- * It starts CameraX only after CAMERA permission is granted. The UI will move
- * to startZaycommQrScanner() directly in the next scanner-surface cleanup.
+ * CAMERA permission is authorization only. Once Android grants it, the scanner
+ * presents the method chooser; it does not silently start CameraX.
  */
 const originalCameraRequest = PermissionsAndroid.request.bind(PermissionsAndroid);
 PermissionsAndroid.request = async (permission: any, ...args: any[]) => {
   const result = await originalCameraRequest(permission, ...args);
   if (permission === PermissionsAndroid.PERMISSIONS.CAMERA && result === PermissionsAndroid.RESULTS.GRANTED) {
-    await startZaycommQrScanner();
+    try { await scanner?.showScanMethodChooser?.(); } catch {}
   }
   return result;
 };
 
-/**
- * Single canonical QR establishment path.
- *
- * 1. Validate the QR and its cryptographic node-id fingerprint.
- * 2. Persist the node as an INTRODUCED peer.
- * 3. Only then notify the UI.
- *
- * QR never starts BLE, authenticates a transport, or marks a peer established.
- */
 export function subscribeToZaycommQr(onDetected: (event: ZaycommQrEvent) => void): EmitterSubscription {
   const subscription = DeviceEventEmitter.addListener('ZaycommQrDetected', async (event: { payload?: string; length?: number }) => {
     if (typeof event?.payload !== 'string') return;
@@ -41,20 +31,9 @@ export function subscribeToZaycommQr(onDetected: (event: ZaycommQrEvent) => void
       });
       await stopZaycommQrScanner();
       onDetected({ payload: event.payload, length: event.length ?? event.payload.length, identity });
-    } catch {
-      // Ignore invalid/non-Zaycomm QR frames and persistence failures.
-    }
+    } catch {}
   });
 
-  // The scanner surface, not the permission button, owns camera startup.
-  // Once the surface subscribes, start CameraX immediately.
-  void startZaycommQrScanner();
-
-  const originalRemove = subscription.remove.bind(subscription);
-  subscription.remove = () => {
-    stopZaycommQrScanner().catch(() => {});
-    originalRemove();
-  };
   return subscription;
 }
 
