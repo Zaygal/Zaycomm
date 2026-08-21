@@ -9,6 +9,7 @@ export type StoredPeer = {
   state: PeerState;
   introducedAt: number;
   establishedAt?: number;
+  transportAddress?: string;
 };
 
 const STORAGE_KEY = '@zaycomm/peers/v1';
@@ -21,6 +22,7 @@ function normalizePeer(peer: StoredPeer): StoredPeer {
     state: peer.state === 'established' ? 'established' : 'introduced',
     introducedAt: Number.isFinite(peer.introducedAt) ? peer.introducedAt : Date.now(),
     ...(peer.establishedAt ? { establishedAt: peer.establishedAt } : {}),
+    ...(peer.transportAddress?.trim() ? { transportAddress: peer.transportAddress.trim() } : {}),
   };
 }
 
@@ -36,9 +38,7 @@ async function read(): Promise<Record<string, StoredPeer>> {
         return typeof peer?.nodeId === 'string' && typeof peer?.publicKey === 'string';
       }).map(([key, value]) => [key, normalizePeer(value as StoredPeer)])
     );
-  } catch {
-    return {};
-  }
+  } catch { return {}; }
 }
 
 async function write(peers: Record<string, StoredPeer>): Promise<void> {
@@ -63,8 +63,19 @@ export async function introducePeer(input: Omit<StoredPeer, 'state' | 'introduce
     state: existing?.state ?? 'introduced',
     introducedAt: existing?.introducedAt ?? Date.now(),
     ...(existing?.establishedAt ? { establishedAt: existing.establishedAt } : {}),
+    ...(input.transportAddress ?? existing?.transportAddress ? { transportAddress: input.transportAddress ?? existing?.transportAddress } : {}),
   });
   peers[peer.nodeId] = peer;
+  await write(peers);
+  return peer;
+}
+
+export async function bindPeerTransport(nodeId: string, transportAddress: string): Promise<StoredPeer | null> {
+  const peers = await read();
+  const existing = peers[nodeId];
+  if (!existing || !transportAddress.trim()) return null;
+  const peer = normalizePeer({ ...existing, transportAddress: transportAddress.trim() });
+  peers[nodeId] = peer;
   await write(peers);
   return peer;
 }
