@@ -1,40 +1,40 @@
-import { DeviceEventEmitter, EmitterSubscription, NativeModules, PermissionsAndroid } from 'react-native';
+import { DeviceEventEmitter, EmitterSubscription, NativeModules } from 'react-native';
 import { introduceZaycommQrIdentity, QrIdentityResult } from './qrIdentity';
-import { introducePeerIdentity } from '../core/peerEstablishment';
+import { bindIntroducedPeerToTransport } from '../core/peerEstablishment';
 
-export type ZaycommQrEvent = { payload: string; length: number; identity: QrIdentityResult };
+export type ZaycommQrEvent = {
+  payload: string;
+  length: number;
+  identity: QrIdentityResult;
+  transportAddress?: string;
+};
+
 const scanner = NativeModules.ZaycommCameraScanner;
 let scanActive = false;
 
-/**
- * CAMERA permission is authorization only. Once Android grants it, the scanner
- * presents the method chooser; it does not silently start CameraX.
- */
-const originalCameraRequest = PermissionsAndroid.request.bind(PermissionsAndroid);
-PermissionsAndroid.request = async (permission: any, ...args: any[]) => {
-  const result = await originalCameraRequest(permission, ...args);
-  if (permission === PermissionsAndroid.PERMISSIONS.CAMERA && result === PermissionsAndroid.RESULTS.GRANTED) {
-    try { await scanner?.showScanMethodChooser?.(); } catch {}
-  }
-  return result;
-};
-
-export function subscribeToZaycommQr(onDetected: (event: ZaycommQrEvent) => void): EmitterSubscription {
-  const subscription = DeviceEventEmitter.addListener('ZaycommQrDetected', async (event: { payload?: string; length?: number }) => {
+export function subscribeToZaycommQr(
+  onDetected: (event: ZaycommQrEvent) => void,
+  getTransportAddress?: () => string | undefined,
+): EmitterSubscription {
+  return DeviceEventEmitter.addListener('ZaycommQrDetected', async (event: { payload?: string; length?: number }) => {
     if (typeof event?.payload !== 'string') return;
     try {
-      const identity = introduceZaycommQrIdentity(event.payload);
-      await introducePeerIdentity({
-        nodeId: identity.identity.nodeId,
-        publicKey: identity.identity.publicKey,
-        capabilities: identity.identity.capabilities ?? [],
-      });
+      const identity = await introduceZaycommQrIdentity(event.payload);
+      const transportAddress = getTransportAddress?.();
+      if (transportAddress) {
+        await bindIntroducedPeerToTransport(identity.identity.nodeId, transportAddress);
+      }
       await stopZaycommQrScanner();
-      onDetected({ payload: event.payload, length: event.length ?? event.payload.length, identity });
-    } catch {}
+      onDetected({
+        payload: event.payload,
+        length: event.length ?? event.payload.length,
+        identity,
+        ...(transportAddress ? { transportAddress } : {}),
+      });
+    } catch {
+      // Invalid QR payloads are ignored; scanning remains active for the next frame.
+    }
   });
-
-  return subscription;
 }
 
 export async function startZaycommQrScanner(): Promise<boolean> {
