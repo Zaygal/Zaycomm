@@ -4,10 +4,12 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Size
+import android.util.TypedValue
 import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
@@ -35,7 +37,10 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 class ZaycommCameraScannerModule(private val context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
-    private companion object { const val GALLERY_REQUEST = 7401 }
+    private companion object {
+        const val GALLERY_REQUEST = 7401
+        const val QR_WINDOW_DP = 244
+    }
 
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val scanner = BarcodeScanning.getClient(
@@ -114,7 +119,7 @@ class ZaycommCameraScannerModule(private val context: ReactApplicationContext) :
                 }
                 val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
                 val analysis = ImageAnalysis.Builder()
-                    .setTargetResolution(Size(1280, 720))
+                    .setTargetResolution(Size(1280, 1280))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                 provider.unbindAll()
@@ -144,20 +149,37 @@ class ZaycommCameraScannerModule(private val context: ReactApplicationContext) :
                 }
                 ContextCompat.getMainExecutor(context).execute {
                     previewContainer?.let { old -> (old.parent as? ViewGroup)?.removeView(old) }
+
+                    val density = context.resources.displayMetrics.density
+                    val qrWindowSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, QR_WINDOW_DP.toFloat(), context.resources.displayMetrics).toInt()
+
                     val container = FrameLayout(context).apply {
-                        setBackgroundColor(android.graphics.Color.BLACK)
-                        addView(previewView, FrameLayout.LayoutParams(-1, -1))
-                        val gallery = Button(context).apply {
-                            text = "CHOOSE FROM GALLERY"
-                            isAllCaps = true
-                            setOnClickListener { openGallery() }
-                        }
-                        addView(gallery, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                            setMargins(32, 0, 32, 48)
-                        })
+                        setBackgroundColor(Color.argb(185, 0, 0, 0))
                     }
-                    activity.addContentView(container, FrameLayout.LayoutParams(-1, -1).apply { gravity = Gravity.TOP or Gravity.START })
+
+                    val previewFrame = FrameLayout(context).apply {
+                        setBackgroundColor(Color.BLACK)
+                        clipChildren = true
+                        clipToPadding = true
+                        addView(previewView, FrameLayout.LayoutParams(-1, -1))
+                    }
+                    container.addView(previewFrame, FrameLayout.LayoutParams(qrWindowSize, qrWindowSize).apply {
+                        gravity = Gravity.CENTER
+                    })
+
+                    val hint = Button(context).apply {
+                        text = "CHOOSE FROM GALLERY"
+                        isAllCaps = true
+                        setOnClickListener { openGallery() }
+                    }
+                    container.addView(hint, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        gravity = Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM
+                        setMargins((32 * density).toInt(), 0, (32 * density).toInt(), (48 * density).toInt())
+                    })
+
+                    activity.addContentView(container, FrameLayout.LayoutParams(-1, -1).apply {
+                        gravity = Gravity.TOP or Gravity.START
+                    })
                     previewContainer = container
                 }
             } catch (t: Throwable) { Log.e("ZaycommCamera", "ANALYSIS_PREPARE_ERROR", t) }
