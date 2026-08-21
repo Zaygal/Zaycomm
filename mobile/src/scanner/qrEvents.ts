@@ -45,6 +45,11 @@ export function subscribeToZaycommQr(onDetected: (event: ZaycommQrEvent) => void
       // Ignore invalid/non-Zaycomm QR frames and persistence failures.
     }
   });
+
+  // The scanner surface, not the permission button, owns camera startup.
+  // Once the surface subscribes, start CameraX immediately.
+  void startZaycommQrScanner();
+
   const originalRemove = subscription.remove.bind(subscription);
   subscription.remove = () => {
     stopZaycommQrScanner().catch(() => {});
