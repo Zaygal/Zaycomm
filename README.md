@@ -1016,4 +1016,4 @@ This is the first stable release of the Zaycomm protocol. All core features are 
 - Multi-hop routing with store and forward
 - Transport agnostic (BLE, Wi-Fi Direct, Internet)
 
-See the [Releases](https://github.com/yourusername/Zaycomm/releases) page for version history.
+See the [Releases](https://github.com/Zaygal/Zaycomm/releases) page for version history.
