@@ -1,7 +1,22 @@
 # Zaycomm Protocol: Complete RFC Series
+
+An offline-first, transport-agnostic mesh communication protocol, specified across ten RFCs
+before implementation. TypeScript reference implementation with native BLE transports for
+Android and iOS, and a test suite written against the protocol's own attack surface.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-v1.0-blue)](https://github.com/yourusername/Zaycomm/releases/tag/v1.0)
-[![Tests](https://img.shields.io/badge/tests-104%20passing-brightgreen)](https://github.com/yourusername/Zaycomm)
+[![Version](https://img.shields.io/badge/version-v1.0-blue)](https://github.com/Zaygal/Zaycomm/releases/tag/v1.0)
+[![Tests](https://img.shields.io/badge/tests-210%20passing-brightgreen)](https://github.com/Zaygal/Zaycomm/tree/main/test)
+[![Spec](https://img.shields.io/badge/spec-RFC--0001--0010-informational)](https://github.com/Zaygal/Zaycomm#table-of-contents)
+[![Composite](https://img.shields.io/badge/composite-X25519%20%7C%20Ed25519%20%7C%20Noise%20IK%20%7C%20Double%20Ratchet-blueviolet)](#)
+[![Transports](https://img.shields.io/badge/transport-BLE%20%7C%20Wi--Fi%20Direct%20%7C%20Internet-blueviolet)](#)
+
+| | |
+|---|---|
+| **Spec** | RFC-0001 through RFC-0010, complete |
+| **Tests** | 43 files, 210 passing (`npx vitest run`) |
+| **Layout** | `src/` protocol · `test/` suite · `mobile/` native app |
+
 ## A Roadmap for a Secure, Decentralized, Transport Agnostic Mesh Communication Protocol
 
 This document combines RFC 0001 through RFC 0010 of the Zaycomm project into a single reference, intended to be used as a build roadmap. Each original RFC remains intact and in order below; nothing has been shortened or altered from the individually issued versions except for the addition of a small number of architecture diagrams at points where a visual helps tie sections together. Cross references between sections (for example, "per RFC 0004, Section 2.3") still work exactly as written, since the numbering scheme is unchanged.
