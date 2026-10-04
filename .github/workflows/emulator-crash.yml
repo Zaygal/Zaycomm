@@ -1,0 +1,126 @@
+name: Emulator crash capture
+
+# Reproduces the native startup crash Sentry reported for the diagnostic build
+# (environment: diagnostic-native) on a clean emulator, and writes the evidence
+# to the run summary. The Sentry event itself needs a login this project does
+# not have, so the crash is reproduced rather than fetched.
+#
+# The job is green whether or not the crash reproduces: reproducing it is the
+# successful outcome. Read the "Crash capture" section of the summary.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/emulator-crash.yml'
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # The emulator refuses to start on a cold runner with the stock disk
+      # budget ("FATAL | Your device does not have enough disk space to run
+      # avd"), because the runner image carries toolchains this job never
+      # touches and Gradle fills the rest. Free space first and print the
+      # budget so it is visible in the log.
+      - name: Free disk space for the emulator
+        run: |
+          echo "== disk before =="; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/share/swift
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/* /usr/local/lib/android/sdk/sources/* 2>/dev/null || true
+          sudo apt-get clean
+          echo "== disk after =="; df -h / | tail -1
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK packages
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          if [ -d "$SDK/platforms/android-36" ] && [ -d "$SDK/build-tools/36.0.0" ]; then
+            echo "Required SDK packages already present in the runner image."
+            exit 0
+          fi
+          SDKMANAGER="$(find "$SDK" -name sdkmanager -type f 2>/dev/null | head -1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found under $SDK; relying on packages already installed."
+            exit 0
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          yes | "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.13'
+          cache-provider: basic
+          cache-read-only: false
+          cache-cleanup: on-success
+
+      - name: Build diagnostic APK
+        working-directory: mobile/android
+        env:
+          GRADLE_OPTS: >-
+            -Dorg.gradle.internal.repository.max.retries=5
+            -Dorg.gradle.internal.repository.initial.backoff=2000
+        run: |
+          set -e
+          for attempt in 1 2 3; do
+            echo "Gradle build attempt ${attempt}/3"
+            if gradle --no-daemon --stacktrace :app:assembleDiagnostic; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Gradle attempt ${attempt} failed; waiting before retry..."
+              sleep $((attempt * 20))
+            fi
+          done
+          exit 1
+
+      - name: Boot emulator, install, capture crash
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: sh "$GITHUB_WORKSPACE/.github/scripts/emulator-crash.sh"
+
+      - name: Upload logcat
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zaycomm-crash-logcat
+          path: /tmp/logcat.txt
+          if-no-files-found: ignore
