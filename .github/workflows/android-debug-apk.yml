@@ -55,6 +55,32 @@ jobs:
           yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
           yes | "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
+      # The pinned NDK must be installed, and its libc++ must actually export the
+      # symbol nitro's compiled output needs. Assert both here, in the build that
+      # produces the artifact, rather than discovering it on a device.
+      - name: Install pinned NDK and verify its libc++
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          NDK_VER="$(grep -oE 'ndkVersion = "[^"]+"' "$GITHUB_WORKSPACE/mobile/android/build.gradle" | head -1 | cut -d'"' -f2)"
+          echo "pinned ndkVersion = $NDK_VER"
+          if [ ! -d "$SDK/ndk/$NDK_VER" ]; then
+            SDKMANAGER="$(find "$SDK" -name sdkmanager -type f 2>/dev/null | head -1)"
+            [ -n "$SDKMANAGER" ] || { echo "sdkmanager not found"; exit 1; }
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+            yes | "$SDKMANAGER" "ndk;$NDK_VER"
+          fi
+          STL="$SDK/ndk/$NDK_VER/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+          [ -f "$STL" ] || { echo "no libc++_shared.so in NDK $NDK_VER"; exit 1; }
+          echo "comment: $(readelf -p .comment "$STL" 2>/dev/null | grep -o 'clang version [0-9.]*' | head -1)"
+          if readelf --dyn-syms --wide "$STL" | grep -q '__cxa_init_primary_exception'; then
+            echo "OK: NDK $NDK_VER libc++ exports __cxa_init_primary_exception"
+          else
+            echo "FAIL: NDK $NDK_VER libc++ does NOT export __cxa_init_primary_exception."
+            echo "libNitroModules.so imports it; the app would crash at dlopen. Pin a newer NDK."
+            exit 1
+          fi
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
@@ -82,6 +108,11 @@ jobs:
             fi
           done
           exit 1
+
+      - name: Native ABI guard
+        run: |
+          sh "$GITHUB_WORKSPACE/.github/scripts/abi-guard.sh" \
+            "$GITHUB_WORKSPACE/mobile/android/app/build/outputs/apk/diagnostic/app-diagnostic.apk"
 
       - name: Verify diagnostic APK contains React Native bundle
         working-directory: mobile/android

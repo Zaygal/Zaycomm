@@ -8,6 +8,10 @@ android {
     namespace 'com.zaycomm.mobile'
     compileSdk 36
 
+    // Same NDK as the root ext: the C++ runtime packaged into the APK and the
+    // one every module links against must match, or dlopen fails at runtime.
+    ndkVersion rootProject.ext.ndkVersion
+
     defaultConfig {
         applicationId 'com.zaycomm.mobile'
         minSdk 26

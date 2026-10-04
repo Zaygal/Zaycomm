@@ -10,6 +10,24 @@ ext {
     compileSdkVersion = 36
     targetSdkVersion = 35
     minSdkVersion = 26
+
+    // Pin the NDK explicitly, and this is load-bearing rather than tidiness.
+    //
+    // react-native-nitro-modules compiles libNitroModules.so from source and
+    // resolves its toolchain with getExtOrDefault("ndkVersion"). With no value
+    // here, Gradle selected the newest NDK installed on the runner (clang 21,
+    // whose libc++ exports __cxa_init_primary_exception) while the
+    // libc++_shared.so packaged into the APK came from clang 18, which does not
+    // export it. The result was a device crash on first launch:
+    //
+    //   UnsatisfiedLinkError: dlopen failed: cannot locate symbol
+    //   "__cxa_init_primary_exception" referenced by libNitroModules.so
+    //
+    // Pinning one version here means every native module, including those
+    // compiled from source, links against the same C++ runtime. Bump this only
+    // together with the modules that need a newer one, and let the ABI guard in
+    // CI prove the result before it reaches a device.
+    ndkVersion = "29.0.14206865"
 }
 
 apply plugin: 'com.facebook.react.rootproject'
