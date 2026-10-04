@@ -43,7 +43,7 @@ jobs:
         run: |
           set -e
           SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          if [ -d "$SDK/platforms/android-35" ] && [ -d "$SDK/build-tools/35.0.0" ]; then
+          if [ -d "$SDK/platforms/android-36" ] && [ -d "$SDK/build-tools/36.0.0" ]; then
             echo "Required SDK packages already present in the runner image."
             exit 0
           fi
@@ -53,7 +53,7 @@ jobs:
             exit 0
           fi
           yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
-          yes | "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          yes | "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6

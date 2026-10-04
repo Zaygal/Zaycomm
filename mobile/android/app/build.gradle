@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace 'com.zaycomm.mobile'
-    compileSdk 35
+    compileSdk 36
 
     defaultConfig {
         applicationId 'com.zaycomm.mobile'

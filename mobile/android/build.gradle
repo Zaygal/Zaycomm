@@ -7,7 +7,7 @@ plugins {
 ext {
     // Provide compatibility values for native libraries such as react-native-svg
     // that read Android SDK versions from the root project.
-    compileSdkVersion = 35
+    compileSdkVersion = 36
     targetSdkVersion = 35
     minSdkVersion = 26
 }
