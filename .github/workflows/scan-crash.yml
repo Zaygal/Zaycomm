@@ -16,12 +16,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Resolve the newest successful APK rather than a pinned run id. The
+      # previous version hard-coded a run and silently tested an older binary
+      # than the one on the device - a reproduction that tests the wrong build
+      # is worse than none, because it looks like evidence.
+      - name: Resolve the newest diagnostic APK
+        id: apk
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow android-debug-apk.yml                   --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ -z "$RID" ]; then echo "no successful APK build found"; exit 1; fi
+          echo "Using APK from run $RID"
+          echo "run_id=$RID" >> "$GITHUB_OUTPUT"
+
       - name: Download the APK that is failing on the device
         uses: actions/download-artifact@v4
         with:
           name: zaycomm-diagnostic-apk
           path: apk
-          run-id: 37229425895
+          run-id: ${{ steps.apk.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Confirm what we are testing

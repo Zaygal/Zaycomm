@@ -175,6 +175,25 @@ echo
 echo "--- react-native / JS thread lines ---"
 grep -aE 'ReactNativeJS|Hermes|Sentry|Zaycomm' "$OUT" | head -25 || true
 
+echo
+echo "== how the process died: crash or kill? =="
+# Sentry reports crashes. It cannot report a process the system kills: a SIGKILL
+# leaves no exception and no tombstone, so there is nothing for an SDK to send.
+# 'Even Sentry isn't catching it' is therefore evidence, not an absence of
+# evidence - and this separates the two cases explicitly instead of inferring.
+if grep -aqE 'ActivityManager: Killing|lowmemorykiller|lmkd|Killing [0-9]+:com.zaycomm|ANR in com.zaycomm' "$OUT"; then
+  echo "  KILLED: the system ended the process. Sentry could not have reported this."
+  grep -aE 'ActivityManager: Killing|lowmemorykiller|lmkd|Killing [0-9]+:com.zaycomm|ANR in com.zaycomm' "$OUT" | head -6
+elif grep -aqE 'FATAL EXCEPTION|am_crash|signal 11|signal 6|SIGSEGV|SIGABRT|abort message|libc *: Fatal signal' "$OUT"; then
+  echo "  CRASHED: a real fault was recorded. Sentry should have caught this."
+  grep -aE 'FATAL EXCEPTION|am_crash|signal 11|signal 6|SIGSEGV|SIGABRT|abort message|libc *: Fatal signal' "$OUT" | head -8
+else
+  echo "  INDETERMINATE: no kill and no fault line in this log."
+fi
+echo
+echo "== anything at all from our package =="
+grep -aiE 'zaycomm' "$OUT" | grep -avE 'Installing|installed|PackageManager|Downloading|Created app' | tail -15
+
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
     echo "## Scan-QR crash reproduction"
