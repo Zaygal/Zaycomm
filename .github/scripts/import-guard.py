@@ -80,6 +80,31 @@ def _names_in(path: str, pattern: re.Pattern[str]) -> set[str]:
     return out
 
 
+def any_camera_import(root: str) -> bool:
+    """Whether ANY import of react-native-vision-camera exists, named or not.
+
+    This is what separates two situations that the zero-names check alone
+    conflated: an import we failed to parse (a real problem, must fail) and no
+    import at all because the app stopped using the library (nothing to verify).
+    """
+    pattern = re.compile(r"from\s*['\"]react-native-vision-camera['\"]")
+    mobile = os.path.join(root, "mobile")
+    for target in SOURCES:
+        path = os.path.join(mobile, target)
+        if os.path.isdir(path):
+            for dirpath, _dirs, files in os.walk(path):
+                for fn in files:
+                    if fn.endswith((".ts", ".tsx")):
+                        with open(os.path.join(dirpath, fn), encoding="utf-8") as fh:
+                            if pattern.search(fh.read()):
+                                return True
+        elif os.path.isfile(path):
+            with open(path, encoding="utf-8") as fh:
+                if pattern.search(fh.read()):
+                    return True
+    return False
+
+
 def main() -> int:
     root = repo_root()
     pkg = os.path.join(root, "mobile", "node_modules", "react-native-vision-camera")
@@ -95,7 +120,15 @@ def main() -> int:
     print(f"              installed version: {version}")
 
     if not names:
-        print("import guard: FAILED - collected zero names from the app source.")
+        if not any_camera_import(root):
+            # The library is installed but the app no longer imports it, because the
+            # scanner moved to react-native-camera-kit (VisionCamera 5 has no Android
+            # code scanner). There is nothing here to verify, and that is a fact about
+            # the app rather than a failure of this check.
+            print("import guard: react-native-vision-camera is no longer imported.")
+            print("              The scanner uses react-native-camera-kit. Nothing to verify.")
+            return 0
+        print("import guard: FAILED - an import exists but collected zero names.")
         print("              This check cannot verify anything, so it must not pass.")
         return 1
 
