@@ -88,19 +88,33 @@ tap_text() {
   $ADB pull /sdcard/ui.xml "dump-tap-$label.xml" >/dev/null 2>&1
   if [ ! -s "dump-tap-$label.xml" ]; then echo "  $label: no dump"; return 1; fi
 
-  hits=$(python3 - "$want" "$where" <<'PY'
+  # The real screen height, not an assumed one. The fallback of 2340 was TALLER
+  # than this emulator's screen, so the bottom-region test rejected every tab
+  # candidate and reported that NEARBY did not exist - while the dump plainly
+  # showed 'NEARBY' in the tab bar on screen. A filter that hides the thing you
+  # are looking for is worse than no filter.
+  local real_h
+  real_h=$($ADB shell wm size 2>/dev/null | sed -n 's/.*: *[0-9]*x\([0-9]*\).*/\1/p' | tr -d '\r')
+  [ -z "$real_h" ] && real_h=2340
+
+  hits=$(python3 - "$want" "$where" "$real_h" <<'PY'
 import re, sys, xml.etree.ElementTree as ET
-want, where = sys.argv[1], sys.argv[2]
+want, where, real_h = sys.argv[1], sys.argv[2], int(sys.argv[3])
 try:
     root = ET.parse('/tmp/ui.xml').getroot()
 except Exception:
     sys.exit(0)
 m0 = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', root.get('bounds') or '')
-screen_h = int(m0.group(4)) if m0 else 2340
+screen_h = real_h or (int(m0.group(4)) if m0 else 2340)
 for n in root.iter('node'):
     text = (n.get('text') or '').strip()
     desc = (n.get('content-desc') or '').strip()
-    if text != want and desc != want:
+    # Case-sensitive SUBSTRING. Equality failed on 'CREATE NODE' and 'NEARBY'
+    # that the dump showed on screen: a node's text carries more than the label.
+    # Case sensitivity is the part that matters - it is what stops 'NEARBY' from
+    # matching the content heading 'Nearby', which is the bug that sent an
+    # earlier version of this script tapping dead space.
+    if want not in text and want not in desc:
         continue
     m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', n.get('bounds') or '')
     if not m:
