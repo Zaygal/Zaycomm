@@ -46,45 +46,103 @@ if ! alive; then
 fi
 echo "app is up (pid $($ADB shell pidof $PKG | tr -d '\r'))"
 
-# Tap a UI element by its visible text, located from a uiautomator dump rather
-# than a guessed coordinate. Prints what it did so a failure is diagnosable.
+# Tap a UI element located from a uiautomator dump rather than a guessed
+# coordinate, matching the visible text EXACTLY and case-sensitively.
+#
+# The case sensitivity is the whole point. The first version matched
+# case-insensitively, so "NEARBY" also matched the page heading "Nearby" in the
+# content area, tapped dead space at y=303, never switched tabs, and reported
+# "no crash" having never reached the scanner. The tab label is upper case; the
+# heading is not. Match exactly and the collision disappears.
+#
+# It also takes an optional region, retries every candidate rather than only the
+# first, and confirms the screen actually changed.
 tap_text() {
-  local want="$1" label="$2"
+  local want="$1" label="$2" where="${3:-any}"
   $ADB shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1
   $ADB pull /sdcard/ui.xml /tmp/ui.xml >/dev/null 2>&1
   if [ ! -s /tmp/ui.xml ]; then echo "  $label: no dump"; return 1; fi
-  local xy
-  xy=$(python3 - "$want" <<'PY'
+
+  hits=$(python3 - "$want" "$where" <<'PY'
 import re, sys, xml.etree.ElementTree as ET
-want = sys.argv[1].upper()
+want, where = sys.argv[1], sys.argv[2]
 try:
     root = ET.parse('/tmp/ui.xml').getroot()
-except Exception as e:
-    print(""); sys.exit(0)
+except Exception:
+    sys.exit(0)
+m0 = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', root.get('bounds') or '')
+screen_h = int(m0.group(4)) if m0 else 2340
 for n in root.iter('node'):
-    hay = ((n.get('text') or '') + ' ' + (n.get('content-desc') or '')).upper()
-    if want in hay:
-        m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', n.get('bounds') or '')
-        if m:
-            x1, y1, x2, y2 = map(int, m.groups())
-            if x2 > x1 and y2 > y1:
-                print(f"{(x1+x2)//2} {(y1+y2)//2}"); sys.exit(0)
-print("")
+    text = (n.get('text') or '').strip()
+    desc = (n.get('content-desc') or '').strip()
+    if text != want and desc != want:
+        continue
+    m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', n.get('bounds') or '')
+    if not m:
+        continue
+    x1, y1, x2, y2 = map(int, m.groups())
+    if x2 <= x1 or y2 <= y1:
+        continue
+    cy = (y1 + y2) // 2
+    if where == 'bottom' and cy < screen_h * 0.85:
+        continue
+    print("%d %d" % ((x1 + x2) // 2, cy))
 PY
 )
-  if [ -z "$xy" ]; then echo "  $label: not on screen"; return 1; fi
-  echo "  $label: tapping at $xy"
-  $ADB shell input tap $xy
+
+  if [ -z "$hits" ]; then
+    echo "  $label: no exact match for '$want'. What IS on screen:"
+    python3 - <<'PY'
+import xml.etree.ElementTree as ET
+try:
+    root = ET.parse('/tmp/ui.xml').getroot()
+except Exception:
+    raise SystemExit
+seen = []
+for n in root.iter('node'):
+    t = (n.get('text') or '').strip()
+    if t and (t.isupper() or len(t) > 3):
+        seen.append(t)
+print("     " + ' | '.join(dict.fromkeys(seen))[:400])
+PY
+    return 1
+  fi
+
+  local n=0
+  while read -r x y; do
+    [ -z "$x" ] && continue
+    n=$((n+1))
+    echo "  $label: tapping candidate $n at ($x,$y)"
+    $ADB shell input tap "$x" "$y"
+    sleep 3
+    if [ "$want" = "NEARBY" ]; then
+      $ADB shell uiautomator dump /sdcard/ui2.xml >/dev/null 2>&1
+      $ADB pull /sdcard/ui2.xml /tmp/ui2.xml >/dev/null 2>&1
+      if grep -aq 'SCAN QR CODE' /tmp/ui2.xml 2>/dev/null; then
+        echo "    -> the Nearby screen is up"
+        break
+      fi
+    fi
+  done <<< "$hits"
   return 0
 }
 
 echo "== driving to the scanner: NEARBY tab, then SCAN QR CODE =="
-tap_text "NEARBY" "NEARBY tab" || true
-sleep 4
-tap_text "SCAN QR" "SCAN QR CODE button" || true
+tap_text "NEARBY" "NEARBY tab" bottom || true
+sleep 3
+$ADB shell uiautomator dump /sdcard/ui3.xml >/dev/null 2>&1
+$ADB pull /sdcard/ui3.xml /tmp/ui3.xml >/dev/null 2>&1
+if grep -aq 'SCAN QR CODE' /tmp/ui3.xml 2>/dev/null; then
+  echo "  scanner button is present"
+else
+  echo "  WARNING: scanner button absent - this run proves nothing about the crash"
+  reached_scanner=no
+fi
+tap_text "SCAN QR CODE" "SCAN QR CODE button" || true
 
 echo "== watching the process for 25s =="
 died_at=""
+reached_scanner=yes
 for i in 5 10 15 20 25; do
   sleep 5
   if alive; then echo "  t+${i}s: alive"; else echo "  t+${i}s: DEAD"; died_at="$i"; break; fi
@@ -94,10 +152,12 @@ $ADB logcat -d > "$OUT" 2>/dev/null || true
 
 echo
 echo "== evidence =="
-if [ -n "$died_at" ]; then
+if [ "${reached_scanner:-yes}" = "no" ]; then
+  echo "RESULT: INCONCLUSIVE - the scanner button was never reached, so this run says nothing"
+elif [ -n "$died_at" ]; then
   echo "RESULT: CRASH REPRODUCED - process died about ${died_at}s after the scan button was tapped"
 else
-  echo "RESULT: NO CRASH in this run - process survived; the scanner may have opened. See 'SCAN QR' line above."
+  echo "RESULT: NO CRASH - scanner opened and the process survived"
 fi
 echo
 echo "--- fatal / exception lines ---"
