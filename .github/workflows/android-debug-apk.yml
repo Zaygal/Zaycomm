@@ -28,6 +28,9 @@ jobs:
       - name: Install mobile dependencies
         run: npm install
 
+      - name: Guard against imports this version does not export
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/import-guard.sh"
+
       - name: Set up Java
         uses: actions/setup-java@v5
         with:

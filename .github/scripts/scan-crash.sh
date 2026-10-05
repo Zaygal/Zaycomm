@@ -127,7 +127,16 @@ PY
   return 0
 }
 
-echo "== driving to the scanner: NEARBY tab, then SCAN QR CODE =="
+echo "== driving to the scanner =="
+# A fresh install opens on first-boot onboarding ("FIRST BOOT / Create your
+# local node"). In that state the tab bar has four tabs and no NEARBY tab at
+# all, so the scanner is unreachable until a node identity exists. Create it the
+# way a human would, then wait for the five-tab app.
+if tap_text "CREATE NODE" "CREATE NODE button" || true; then
+  echo "  node identity requested; waiting for the app to settle"
+  sleep 25
+fi
+
 tap_text "NEARBY" "NEARBY tab" bottom || true
 sleep 3
 $ADB shell uiautomator dump /sdcard/ui3.xml >/dev/null 2>&1
@@ -140,9 +149,9 @@ else
 fi
 tap_text "SCAN QR CODE" "SCAN QR CODE button" || true
 
+reached_scanner=${reached_scanner:-yes}
 echo "== watching the process for 25s =="
 died_at=""
-reached_scanner=yes
 for i in 5 10 15 20 25; do
   sleep 5
   if alive; then echo "  t+${i}s: alive"; else echo "  t+${i}s: DEAD"; died_at="$i"; break; fi

@@ -20,7 +20,13 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { Camera, useCameraDevice, useCameraPermission, useCodeScanner } from 'react-native-vision-camera';
+import {
+  Camera,
+  isScannedCode,
+  useCameraDevice,
+  useCameraPermission,
+  useObjectOutput,
+} from 'react-native-vision-camera';
 import type { PeerAuthStage } from './peerAuth';
 
 export interface ScanQrResult {
@@ -81,7 +87,22 @@ export default function ScanQrScreen({ c, stage, result, onCaptured, onClose, on
     [captured, onCaptured]
   );
 
-  const codeScanner = useCodeScanner({ codeTypes: ['qr'], onCodeScanned });
+  // VisionCamera 5 has no useCodeScanner - it was a v4 API, and calling it here
+  // threw 'is not a function' at mount, killing the app the instant the scanner
+  // opened. v5 delivers scanned objects through an output attached to the Camera
+  // view instead: useObjectOutput({types}) hands back a CameraObjectOutput whose
+  // callback receives ScannedObject instances, and a QR one is a ScannedCode
+  // whose `value` is the payload. The mapping below keeps the capture logic above
+  // untouched.
+  const objectOutput = useObjectOutput({
+    types: ['qr'],
+    onObjectsScanned: (objects: any[]) => {
+      const codes = objects
+        .filter((o) => isScannedCode(o) && typeof o.value === 'string' && o.value.length > 0)
+        .map((o) => ({ value: o.value as string }));
+      if (codes.length > 0) onCodeScanned(codes);
+    },
+  });
 
   // The viewfinder is live only while nothing has been captured and no result
   // is in flight. This is what closes the camera after a successful capture.
@@ -103,7 +124,7 @@ export default function ScanQrScreen({ c, stage, result, onCaptured, onClose, on
 
       <View style={[s.viewport, { borderColor: c.border, backgroundColor: c.surface }]}>
         {scanning && hasPermission && device ? (
-          <Camera style={StyleSheet.absoluteFill} device={device} isActive codeScanner={codeScanner} />
+          <Camera style={StyleSheet.absoluteFill} device={device} isActive outputs={[objectOutput]} />
         ) : (
           <View style={s.viewportIdle}>
             {busy ? (
