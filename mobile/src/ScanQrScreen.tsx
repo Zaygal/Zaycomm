@@ -10,7 +10,7 @@
 // camera is torn down immediately so the user is never stranded on a live
 // viewfinder while authentication runs.
 
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -20,13 +20,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import {
-  Camera,
-  isScannedCode,
-  useCameraDevice,
-  useCameraPermission,
-  useObjectOutput,
-} from 'react-native-vision-camera';
+import { Camera, CameraType } from 'react-native-camera-kit';
 import type { PeerAuthStage } from './peerAuth';
 
 export interface ScanQrResult {
@@ -69,9 +63,27 @@ const STAGE_LABEL: Record<PeerAuthStage, string> = {
 };
 
 export default function ScanQrScreen({ c, stage, result, onCaptured, onClose, onRetry }: Props) {
-  const device = useCameraDevice('back');
-  const { hasPermission, requestPermission } = useCameraPermission();
+  // react-native-vision-camera 5 cannot scan codes on Android at all. Its
+  // CameraObjectOutput is declared in HybridCameraFactory.kt and then throws:
+  //   throw Error("CameraObjectOutput is not available on Android!")
+  // which is what killed the app the instant this screen mounted. The library
+  // offers frames, photo, video and preview on Android - no code scanner. So the
+  // scanning is done by camera-kit, which is used for nothing else in this app.
+  const [hasPermission, setHasPermission] = useState(false);
   const [captured, setCaptured] = useState(false);
+
+  const requestPermission = useCallback(async () => {
+    try {
+      setHasPermission(await Camera.requestDeviceCameraAuthorization());
+    } catch {
+      setHasPermission(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    requestPermission();
+  }, [requestPermission]);
+
   const [manual, setManual] = useState('');
   const [showManual, setShowManual] = useState(false);
 
@@ -86,23 +98,6 @@ export default function ScanQrScreen({ c, stage, result, onCaptured, onClose, on
     },
     [captured, onCaptured]
   );
-
-  // VisionCamera 5 has no useCodeScanner - it was a v4 API, and calling it here
-  // threw 'is not a function' at mount, killing the app the instant the scanner
-  // opened. v5 delivers scanned objects through an output attached to the Camera
-  // view instead: useObjectOutput({types}) hands back a CameraObjectOutput whose
-  // callback receives ScannedObject instances, and a QR one is a ScannedCode
-  // whose `value` is the payload. The mapping below keeps the capture logic above
-  // untouched.
-  const objectOutput = useObjectOutput({
-    types: ['qr'],
-    onObjectsScanned: (objects: any[]) => {
-      const codes = objects
-        .filter((o) => isScannedCode(o) && typeof o.value === 'string' && o.value.length > 0)
-        .map((o) => ({ value: o.value as string }));
-      if (codes.length > 0) onCodeScanned(codes);
-    },
-  });
 
   // The viewfinder is live only while nothing has been captured and no result
   // is in flight. This is what closes the camera after a successful capture.
@@ -123,8 +118,14 @@ export default function ScanQrScreen({ c, stage, result, onCaptured, onClose, on
       </View>
 
       <View style={[s.viewport, { borderColor: c.border, backgroundColor: c.surface }]}>
-        {scanning && hasPermission && device ? (
-          <Camera style={StyleSheet.absoluteFill} device={device} isActive outputs={[objectOutput]} />
+        {scanning && hasPermission ? (
+          <Camera
+            style={StyleSheet.absoluteFill}
+            cameraType={CameraType.Back}
+            scanBarcode
+            showFrame={false}
+            onReadCode={event => onCodeScanned([{ value: event.nativeEvent.codeStringValue }])}
+          />
         ) : (
           <View style={s.viewportIdle}>
             {busy ? (
