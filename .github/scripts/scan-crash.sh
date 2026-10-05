@@ -57,11 +57,36 @@ echo "app is up (pid $($ADB shell pidof $PKG | tr -d '\r'))"
 #
 # It also takes an optional region, retries every candidate rather than only the
 # first, and confirms the screen actually changed.
+# Print what is on screen, always, and keep the dump as an artifact. Without
+# this the only record of a failed run is a logcat, and a harness that cannot
+# show you the screen cannot be debugged - which is exactly how four runs got
+# spent reporting "scanner button absent" without ever revealing why.
+peek() {
+  local label="$1" tag="${2:-ui}"
+  $ADB shell uiautomator dump /sdcard/peek.xml >/dev/null 2>&1
+  $ADB pull /sdcard/peek.xml "dump-$tag.xml" >/dev/null 2>&1
+  if [ ! -s "dump-$tag.xml" ]; then echo "  [$label] no dump available"; return 0; fi
+  echo "  [$label] on screen:"
+  python3 - "dump-$tag.xml" <<'PY'
+import sys, xml.etree.ElementTree as ET
+try:
+    root = ET.parse(sys.argv[1]).getroot()
+except Exception:
+    raise SystemExit
+seen = []
+for n in root.iter('node'):
+    t = (n.get('text') or '').strip() or (n.get('content-desc') or '').strip()
+    if t and n.get('bounds'):
+        seen.append(t)
+print("     " + ' | '.join(dict.fromkeys(seen))[:600])
+PY
+}
+
 tap_text() {
   local want="$1" label="$2" where="${3:-any}"
   $ADB shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1
-  $ADB pull /sdcard/ui.xml /tmp/ui.xml >/dev/null 2>&1
-  if [ ! -s /tmp/ui.xml ]; then echo "  $label: no dump"; return 1; fi
+  $ADB pull /sdcard/ui.xml "dump-tap-$label.xml" >/dev/null 2>&1
+  if [ ! -s "dump-tap-$label.xml" ]; then echo "  $label: no dump"; return 1; fi
 
   hits=$(python3 - "$want" "$where" <<'PY'
 import re, sys, xml.etree.ElementTree as ET
@@ -132,12 +157,25 @@ echo "== driving to the scanner =="
 # local node"). In that state the tab bar has four tabs and no NEARBY tab at
 # all, so the scanner is unreachable until a node identity exists. Create it the
 # way a human would, then wait for the five-tab app.
-if tap_text "CREATE NODE" "CREATE NODE button" || true; then
+#
+# Whether that tap matched is now reported. It used to be `|| true` inside an
+# `if`, so the "node identity requested" line printed either way and read like
+# evidence when it was not.
+peek "at launch" launch
+if tap_text "CREATE NODE" "CREATE NODE button"; then
   echo "  node identity requested; waiting for the app to settle"
   sleep 25
+  peek "after create node" after-create
+else
+  echo "  no CREATE NODE button - the app is already past onboarding"
+  peek "after create node" after-create
 fi
 
-tap_text "NEARBY" "NEARBY tab" bottom || true
+if tap_text "NEARBY" "NEARBY tab" bottom; then
+  echo "  NEARBY tab tapped"
+else
+  echo "  NEARBY tab not found"
+fi
 sleep 3
 $ADB shell uiautomator dump /sdcard/ui3.xml >/dev/null 2>&1
 $ADB pull /sdcard/ui3.xml /tmp/ui3.xml >/dev/null 2>&1
@@ -181,10 +219,14 @@ echo "== how the process died: crash or kill? =="
 # leaves no exception and no tombstone, so there is nothing for an SDK to send.
 # 'Even Sentry isn't catching it' is therefore evidence, not an absence of
 # evidence - and this separates the two cases explicitly instead of inferring.
-if grep -aqE 'ActivityManager: Killing|lowmemorykiller|lmkd|Killing [0-9]+:com.zaycomm|ANR in com.zaycomm' "$OUT"; then
-  echo "  KILLED: the system ended the process. Sentry could not have reported this."
-  grep -aE 'ActivityManager: Killing|lowmemorykiller|lmkd|Killing [0-9]+:com.zaycomm|ANR in com.zaycomm' "$OUT" | head -6
-elif grep -aqE 'FATAL EXCEPTION|am_crash|signal 11|signal 6|SIGSEGV|SIGABRT|abort message|libc *: Fatal signal' "$OUT"; then
+# Scoped to our own package. The first version matched any `ActivityManager:
+# Killing` line, which is the emulator reaping unrelated apps (chrome,
+# setupwizard, onetimeinitializer) - it reported KILLED on a run where the crash
+# was never even reached. A classifier that fires on other apps is not evidence.
+if grep -aqE "Killing [0-9]+:${PKG}|lowmemorykiller.*${PKG}|lmkd.*${PKG}|ANR in ${PKG}|Force stopping ${PKG}" "$OUT"; then
+  echo "  KILLED: the system ended OUR process. Sentry could not have reported this."
+  grep -aE "Killing [0-9]+:${PKG}|lowmemorykiller.*${PKG}|lmkd.*${PKG}|ANR in ${PKG}|Force stopping ${PKG}" "$OUT" | head -6
+elif grep -aqE "FATAL EXCEPTION|am_crash|signal 11|signal 6|SIGSEGV|SIGABRT|abort message|libc *: Fatal signal" "$OUT"; then
   echo "  CRASHED: a real fault was recorded. Sentry should have caught this."
   grep -aE 'FATAL EXCEPTION|am_crash|signal 11|signal 6|SIGSEGV|SIGABRT|abort message|libc *: Fatal signal' "$OUT" | head -8
 else
