@@ -97,12 +97,15 @@ tap_text() {
   real_h=$($ADB shell wm size 2>/dev/null | sed -n 's/.*: *[0-9]*x\([0-9]*\).*/\1/p' | tr -d '\r')
   [ -z "$real_h" ] && real_h=2340
 
-  hits=$(python3 - "$want" "$where" "$real_h" <<'PY'
+  hits=$(python3 - "$want" "$where" "$real_h" "dump-tap-$label.xml" <<'PY'
 import re, sys, xml.etree.ElementTree as ET
-want, where, real_h = sys.argv[1], sys.argv[2], int(sys.argv[3])
+want, where, real_h, path = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 try:
-    root = ET.parse('/tmp/ui.xml').getroot()
-except Exception:
+    root = ET.parse(path).getroot()
+except Exception as exc:
+    # Say so. Swallowing this is what made a path mismatch look like a screen
+    # with no matching label: the parser read nothing and reported no hits.
+    print("parser could not read %s: %s" % (path, exc), file=sys.stderr)
     sys.exit(0)
 m0 = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', root.get('bounds') or '')
 screen_h = real_h or (int(m0.group(4)) if m0 else 2340)
@@ -130,11 +133,11 @@ PY
 )
 
   if [ -z "$hits" ]; then
-    echo "  $label: no exact match for '$want'. What IS on screen:"
-    python3 - <<'PY'
-import xml.etree.ElementTree as ET
+    echo "  $label: no match for '$want'. What IS on screen:"
+    python3 - "dump-tap-$label.xml" <<'PY'
+import sys, xml.etree.ElementTree as ET
 try:
-    root = ET.parse('/tmp/ui.xml').getroot()
+    root = ET.parse(sys.argv[1]).getroot()
 except Exception:
     raise SystemExit
 seen = []
@@ -156,8 +159,8 @@ PY
     sleep 3
     if [ "$want" = "NEARBY" ]; then
       $ADB shell uiautomator dump /sdcard/ui2.xml >/dev/null 2>&1
-      $ADB pull /sdcard/ui2.xml /tmp/ui2.xml >/dev/null 2>&1
-      if grep -aq 'SCAN QR CODE' /tmp/ui2.xml 2>/dev/null; then
+      $ADB pull /sdcard/ui2.xml "dump-after-$label.xml" >/dev/null 2>&1
+      if grep -aq 'SCAN QR CODE' "dump-after-$label.xml" 2>/dev/null; then
         echo "    -> the Nearby screen is up"
         break
       fi
@@ -192,8 +195,8 @@ else
 fi
 sleep 3
 $ADB shell uiautomator dump /sdcard/ui3.xml >/dev/null 2>&1
-$ADB pull /sdcard/ui3.xml /tmp/ui3.xml >/dev/null 2>&1
-if grep -aq 'SCAN QR CODE' /tmp/ui3.xml 2>/dev/null; then
+$ADB pull /sdcard/ui3.xml dump-nearby.xml >/dev/null 2>&1
+if grep -aq 'SCAN QR CODE' dump-nearby.xml 2>/dev/null; then
   echo "  scanner button is present"
 else
   echo "  WARNING: scanner button absent - this run proves nothing about the crash"
