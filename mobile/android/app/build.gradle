@@ -16,8 +16,11 @@ android {
         applicationId 'com.zaycomm.mobile'
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName '0.1.0'
+        // Bumped for every shipped build. Version 1 covered a broken scanner,
+        // the ABI fix and the scanner fix alike, so Android could not tell them
+        // apart and neither could the person installing them.
+        versionCode 2
+        versionName '0.1.0+scanner-v5-api'
     }
 
     buildTypes {
