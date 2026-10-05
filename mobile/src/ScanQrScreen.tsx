@@ -13,6 +13,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Linking,
+  PermissionsAndroid,
+  Platform,
   Pressable,
   SafeAreaView,
   StyleSheet,
@@ -70,11 +73,36 @@ export default function ScanQrScreen({ c, stage, result, onCaptured, onClose, on
   // offers frames, photo, video and preview on Android - no code scanner. So the
   // scanning is done by camera-kit, which is used for nothing else in this app.
   const [hasPermission, setHasPermission] = useState(false);
+  // After a second denial Android stops showing the dialog and reports
+  // NEVER_ASK_AGAIN. Treated as a plain denial, the button then looks broken -
+  // it asks, nothing appears, and the screen never changes. The two outcomes
+  // need different words and a different action.
+  const [blocked, setBlocked] = useState(false);
   const [captured, setCaptured] = useState(false);
 
   const requestPermission = useCallback(async () => {
     try {
+      if (Platform.OS === 'android') {
+        // requestDeviceCameraAuthorization() is react-native-camera-kit's iOS
+        // path. On Android it is a no-op: no dialog, no error, no permission.
+        // That is why tapping ALLOW CAMERA did nothing at all. Android's runtime
+        // dialog comes from PermissionsAndroid, and CAMERA is already declared in
+        // AndroidManifest.xml, so the dialog can actually be shown.
+        const result = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.CAMERA,
+          {
+            title: 'Camera',
+            message: 'Zaycomm needs the camera to read a node code.',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Not now',
+          }
+        );
+        setHasPermission(result === PermissionsAndroid.RESULTS.GRANTED);
+        setBlocked(result === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN);
+        return;
+      }
       setHasPermission(await Camera.requestDeviceCameraAuthorization());
+      setBlocked(false);
     } catch {
       setHasPermission(false);
     }
@@ -126,6 +154,24 @@ export default function ScanQrScreen({ c, stage, result, onCaptured, onClose, on
             showFrame={false}
             onReadCode={event => onCodeScanned([{ value: event.nativeEvent.codeStringValue }])}
           />
+        ) : scanning ? (
+          // Permission is the only reason a scanning screen has no viewfinder, so
+          // this branch and the idle branch are mutually exclusive. Rendering the
+          // idle state underneath announced 'SCANNER READY' at the same moment as
+          // 'CAMERA PERMISSION NEEDED'.
+          <View style={s.viewportIdle}>
+            <Text style={[s.stateLabel, { color: c.warning }]}>CAMERA PERMISSION NEEDED</Text>
+            <Text style={[s.stateText, { color: c.dim }]}>
+              {blocked
+                ? 'Android will not ask again. Enable Camera in Settings to scan.'
+                : 'Zaycomm needs the camera to read a node code.'}
+            </Text>
+            <Pressable
+              onPress={() => (blocked ? Linking.openSettings() : requestPermission())}
+              style={[s.cta, { backgroundColor: c.signal }]}>
+              <Text style={s.ctaText}>{blocked ? 'OPEN SETTINGS' : 'ALLOW CAMERA'}</Text>
+            </Pressable>
+          </View>
         ) : (
           <View style={s.viewportIdle}>
             {busy ? (
@@ -144,17 +190,6 @@ export default function ScanQrScreen({ c, stage, result, onCaptured, onClose, on
             {result?.code ? <Text style={[s.codeText, { color: c.dim }]}>{result.code}</Text> : null}
           </View>
         )}
-        {scanning && !hasPermission ? (
-          <View style={s.viewportIdle}>
-            <Text style={[s.stateLabel, { color: c.warning }]}>CAMERA PERMISSION NEEDED</Text>
-            <Text style={[s.stateText, { color: c.dim }]}>
-              Zaycomm needs the camera to read a node code.
-            </Text>
-            <Pressable onPress={() => requestPermission()} style={[s.cta, { backgroundColor: c.signal }]}>
-              <Text style={s.ctaText}>ALLOW CAMERA</Text>
-            </Pressable>
-          </View>
-        ) : null}
       </View>
 
       {stage === 'failed' ? (
