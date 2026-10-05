@@ -29,7 +29,7 @@ jobs:
         run: npm install
 
       - name: Guard against imports this version does not export
-        run: bash "$GITHUB_WORKSPACE/.github/scripts/import-guard.sh"
+        run: python3 "$GITHUB_WORKSPACE/.github/scripts/import-guard.py"
 
       - name: Set up Java
         uses: actions/setup-java@v5
