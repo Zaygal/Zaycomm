@@ -1,0 +1,111 @@
+name: Zaycomm real UI capture
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/zaycomm-ui-capture.yml'
+      - '.github/scripts/zaycomm-ui-capture.sh'
+      - 'mobile/**'
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/share/swift
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/* /usr/local/lib/android/sdk/sources/* 2>/dev/null || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK packages
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          if [ ! -d "$SDK/platforms/android-36" ] || [ ! -d "$SDK/build-tools/36.0.0" ]; then
+            SDKMANAGER="$(find "$SDK" -name sdkmanager -type f 2>/dev/null | head -1)"
+            [ -n "$SDKMANAGER" ] || exit 1
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+            yes | "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          fi
+
+      - name: Install pinned NDK and verify libc++
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          NDK_VER="$(grep -oE 'ndkVersion = "[^"]+"' "$GITHUB_WORKSPACE/mobile/android/build.gradle" | head -1 | cut -d'"' -f2)"
+          if [ ! -d "$SDK/ndk/$NDK_VER" ]; then
+            SDKMANAGER="$(find "$SDK" -name sdkmanager -type f 2>/dev/null | head -1)"
+            [ -n "$SDKMANAGER" ] || exit 1
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+            yes | "$SDKMANAGER" "ndk;$NDK_VER"
+          fi
+          STL="$SDK/ndk/$NDK_VER/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+          test -f "$STL"
+          readelf --dyn-syms --wide "$STL" | grep -q '__cxa_init_primary_exception'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.13'
+          cache-provider: basic
+          cache-read-only: false
+          cache-cleanup: on-success
+
+      - name: Build diagnostic APK
+        working-directory: mobile/android
+        run: gradle --no-daemon --stacktrace :app:assembleDiagnostic
+
+      - name: Capture real app UI
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: Pixel_6
+          force-avd-creation: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            mkdir -p "$GITHUB_WORKSPACE/film/raw/zaycomm-ui"
+            adb install -r "$GITHUB_WORKSPACE/mobile/android/app/build/outputs/apk/diagnostic/app-diagnostic.apk"
+            sh "$GITHUB_WORKSPACE/.github/scripts/zaycomm-ui-capture.sh"
+
+      - name: Upload real UI capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zaycomm-real-ui-capture
+          path: film/raw/zaycomm-ui/
+          if-no-files-found: error
